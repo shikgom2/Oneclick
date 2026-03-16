@@ -116,11 +116,11 @@ class ExperimentView(APIView):
                     diff3=self.eeg_obj_save(EEGDiff3, 'diff3', eval(data['eeg'])),
                     diff4=self.eeg_obj_save(EEGDiff4, 'diff4', eval(data['eeg'])),
                     faa=EEGFAA.objects.create(
-                        delta=self.base64_file(eval(data['eeg'])['faa']['delta']),
-                        theta=self.base64_file(eval(data['eeg'])['faa']['theta']),
-                        alpha=self.base64_file(eval(data['eeg'])['faa']['alpha']),
-                        beta=self.base64_file(eval(data['eeg'])['faa']['beta']),
-                        gamma=self.base64_file(eval(data['eeg'])['faa']['gamma'])
+                        faa_baseline=self.base64_file(eval(data['eeg'])['faa']['faa_baseline']),
+                        faa_stimulation1=self.base64_file(eval(data['eeg'])['faa']['faa_stimulation1']),
+                        faa_recovery1=self.base64_file(eval(data['eeg'])['faa']['faa_recovery1']),
+                        faa_stimulation2=self.base64_file(eval(data['eeg'])['faa']['faa_stimulation2']),
+                        faa_recovery2=self.base64_file(eval(data['eeg'])['faa']['faa_recovery2'])
                     ),
                 )
 
@@ -151,12 +151,14 @@ class ExperimentView(APIView):
             birth = self.get_value(data, 'birth')
             sex = self.get_value(data, 'sex')
             measurement_date = self.get_value(data, 'measurement_date')
+            trigger = self.get_value(data, 'trigger')
 
             exp = Experiments(name=data['name'], age=age, birth=birth, sex=sex,
                               measurement_date=measurement_date,
                               hrv=hrv,
                               eeg=eeg,
-                              report=report)
+                              report=report,
+                              trigger=trigger)
             exp.save()
             return Response(
                 {'result': 'Success!!'},

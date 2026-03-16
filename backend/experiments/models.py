@@ -54,6 +54,11 @@ class Experiments(TimeStampedModel):
         db_comment='EXPERIMENT_REPORT'
     )
 
+    trigger = models.JSONField(
+        null=True,
+        db_column='EXPERIMENT_TRIGGER'
+    )
+    
     class Meta:
         db_table = 'OC_EXPERIMENTS'
         ordering = ['-int_dt']

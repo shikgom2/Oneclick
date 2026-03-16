@@ -101,25 +101,25 @@ class EEGFrontalLimbic(TimeStampedModel):
     )
 
 class EEGFAA(TimeStampedModel):
-    delta = models.ImageField(
+    faa_baseline = models.ImageField(
         null=False, blank=False,
-        db_column='EEG_FRONTAL_ASYMMETRY_DELTA'
+        db_column='EEG_FRONTAL_ASYMMETRY_BASELINE'
     )
-    theta = models.ImageField(
+    faa_stimulation1 = models.ImageField(
         null=False, blank=False,
-        db_column='EEG_FRONTAL_ASYMMETRY_THETA'
+        db_column='EEG_FRONTAL_ASYMMETRY_STIMULATION1'
     )
-    alpha = models.ImageField(
+    faa_recovery1 = models.ImageField(
         null=False, blank=False,
-        db_column='EEG_FRONTAL_ASYMMETRY_ALPHA'
+        db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY1'
     )
-    beta = models.ImageField(
+    faa_stimulation2 = models.ImageField(
         null=False, blank=False,
-        db_column='EEG_FRONTAL_ASYMMETRY_BETA'
+        db_column='EEG_FRONTAL_ASYMMETRY_STIMULATION2'
     )
-    gamma = models.ImageField(
+    faa_recovery2 = models.ImageField(
         null=False, blank=False,
-        db_column='EEG_FRONTAL_ASYMMETRY_GAMMA'
+        db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY2'
     )
 
     class Meta:
