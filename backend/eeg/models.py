@@ -67,6 +67,11 @@ class EEG(TimeStampedModel):
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_FAA_ID'
     )
+    psd_spectrogram = models.ForeignKey(
+        'eeg.EEGPSDSpectrogram',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_PSD_SPECTOGRAM_ID'
+    )
     
 
     note = models.TextField(
@@ -91,6 +96,10 @@ class EEGFrontalLimbic(TimeStampedModel):
         null=False, blank=False,
         db_column='EEG_FRONTAL_LIMBIC_ALPHA'
     )
+    sigma = models.ImageField(
+        null=False, blank=False,
+        db_column='EEG_FRONTAL_LIMBIC_SIGMA'
+    )
     beta = models.ImageField(
         null=False, blank=False,
         db_column='EEG_FRONTAL_LIMBIC_BETA'
@@ -99,6 +108,25 @@ class EEGFrontalLimbic(TimeStampedModel):
         null=False, blank=False,
         db_column='EEG_FRONTAL_LIMBIC_GAMMA'
     )
+
+class EEGPSDSpectrogram(TimeStampedModel):
+    cz  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_CZ')
+    c3  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_C3')
+    c4  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_C4')
+    fp1 = models.ImageField(null=True, blank=True, db_column='EEG_PSD_FP1')
+    fp2 = models.ImageField(null=True, blank=True, db_column='EEG_PSD_FP2')
+    f3  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_F3')
+    f4  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_F4')
+    f7  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_F7')
+    f8  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_F8')
+    t3  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_T3')
+    t4  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_T4')
+    p3  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_P3')
+    p4  = models.ImageField(null=True, blank=True, db_column='EEG_PSD_P4')
+
+    class Meta:
+        db_table = 'OC_EEG_PSD_SPECTOGRAM'
+
 
 class EEGFAA(TimeStampedModel):
     faa_baseline = models.ImageField(
@@ -139,6 +167,10 @@ class EEGParameter(TimeStampedModel):
         null=False, blank=False,
         db_column='EEG_TOPOGRAPHY_ALPHA'
     )
+    topography_sigma = models.ImageField(
+        null=False, blank=False,
+        db_column='EEG_TOPOGRAPHY_SIGMA'
+    )
     topography_beta = models.ImageField(
         null=False, blank=False,
         db_column='EEG_TOPOGRAPHY_BETA'
@@ -160,6 +192,10 @@ class EEGParameter(TimeStampedModel):
         null=False, blank=False,
         db_column='EEG_CONNECTIVITY_ALPHA_COH'
     )
+    connectivity_sigma = models.ImageField(
+        null=False, blank=False,
+        db_column='EEG_CONNECTIVITY_SIGMA_COH'
+    )
     connectivity_beta = models.ImageField(
         null=False, blank=False,
         db_column='EEG_CONNECTIVITY_BETA_COH'
@@ -180,6 +216,10 @@ class EEGParameter(TimeStampedModel):
     connectivity2_alpha = models.ImageField(
         null=True, blank=True,
         db_column='EEG_CONNECTIVITY_ALPHA_PLV'
+    )
+    connectivity2_sigma = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_CONNECTIVITY_SIGMA_PLV'
     )
     connectivity2_beta = models.ImageField(
         null=True, blank=True,
@@ -223,21 +263,106 @@ class EEGRecovery2(EEGParameter):
         db_table = 'OC_EEG_RECOVERY_2'
 
 
-class EEGDiff1(EEGParameter):
+class EEGDiffParameter(EEGParameter):
+    # >> WAKE stage topography
+    topography_delta_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_WAKE')
+    topography_theta_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_THETA_WAKE')
+    topography_alpha_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_ALPHA_WAKE')
+    topography_sigma_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_SIGMA_WAKE')
+    topography_beta_wake  = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_BETA_WAKE')
+    topography_gamma_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_GAMMA_WAKE')
+
+    # >> N1 stage topography
+    topography_delta_n1 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_N1')
+    topography_theta_n1 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_THETA_N1')
+    topography_alpha_n1 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_ALPHA_N1')
+    topography_sigma_n1 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_SIGMA_N1')
+    topography_beta_n1  = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_BETA_N1')
+    topography_gamma_n1 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_GAMMA_N1')
+
+    # >> N2 stage topography
+    topography_delta_n2 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_N2')
+    topography_theta_n2 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_THETA_N2')
+    topography_alpha_n2 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_ALPHA_N2')
+    topography_sigma_n2 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_SIGMA_N2')
+    topography_beta_n2  = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_BETA_N2')
+    topography_gamma_n2 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_GAMMA_N2')
+
+    # >> N3 stage topography
+    topography_delta_n3 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_N3')
+    topography_theta_n3 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_THETA_N3')
+    topography_alpha_n3 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_ALPHA_N3')
+    topography_sigma_n3 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_SIGMA_N3')
+    topography_beta_n3  = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_BETA_N3')
+    topography_gamma_n3 = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_GAMMA_N3')
+
+    # >> REM stage topography
+    topography_delta_rem = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_REM')
+    topography_theta_rem = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_THETA_REM')
+    topography_alpha_rem = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_ALPHA_REM')
+    topography_sigma_rem = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_SIGMA_REM')
+    topography_beta_rem  = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_BETA_REM')
+    topography_gamma_rem = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_GAMMA_REM')
+
+    # >> WAKE stage connectivity
+    connectivity_delta_wake = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_DELTA_WAKE')
+    connectivity_theta_wake = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_THETA_WAKE')
+    connectivity_alpha_wake = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_ALPHA_WAKE')
+    connectivity_sigma_wake = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_SIGMA_WAKE')
+    connectivity_beta_wake  = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_BETA_WAKE')
+    connectivity_gamma_wake = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_GAMMA_WAKE')
+
+    # >> N1 stage connectivity
+    connectivity_delta_n1 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_DELTA_N1')
+    connectivity_theta_n1 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_THETA_N1')
+    connectivity_alpha_n1 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_ALPHA_N1')
+    connectivity_sigma_n1 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_SIGMA_N1')
+    connectivity_beta_n1  = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_BETA_N1')
+    connectivity_gamma_n1 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_GAMMA_N1')
+
+    # >> N2 stage connectivity
+    connectivity_delta_n2 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_DELTA_N2')
+    connectivity_theta_n2 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_THETA_N2')
+    connectivity_alpha_n2 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_ALPHA_N2')
+    connectivity_sigma_n2 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_SIGMA_N2')
+    connectivity_beta_n2  = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_BETA_N2')
+    connectivity_gamma_n2 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_GAMMA_N2')
+
+    # >> N3 stage connectivity
+    connectivity_delta_n3 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_DELTA_N3')
+    connectivity_theta_n3 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_THETA_N3')
+    connectivity_alpha_n3 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_ALPHA_N3')
+    connectivity_sigma_n3 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_SIGMA_N3')
+    connectivity_beta_n3  = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_BETA_N3')
+    connectivity_gamma_n3 = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_GAMMA_N3')
+
+    # >> REM stage connectivity
+    connectivity_delta_rem = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_DELTA_REM')
+    connectivity_theta_rem = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_THETA_REM')
+    connectivity_alpha_rem = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_ALPHA_REM')
+    connectivity_sigma_rem = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_SIGMA_REM')
+    connectivity_beta_rem  = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_BETA_REM')
+    connectivity_gamma_rem = models.ImageField(null=True, blank=True, db_column='EEG_CONNECTIVITY_GAMMA_REM')
+
+    class Meta:
+        abstract = True
+
+
+class EEGDiff1(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_1'
 
 
-class EEGDiff2(EEGParameter):
+class EEGDiff2(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_2'
 
 
-class EEGDiff3(EEGParameter):
+class EEGDiff3(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_3'
 
 
-class EEGDiff4(EEGParameter):
+class EEGDiff4(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_4'
