@@ -97,7 +97,7 @@ class EEGFrontalLimbic(TimeStampedModel):
         db_column='EEG_FRONTAL_LIMBIC_ALPHA'
     )
     sigma = models.ImageField(
-        null=False, blank=False,
+        null=True, blank=True,
         db_column='EEG_FRONTAL_LIMBIC_SIGMA'
     )
     beta = models.ImageField(
@@ -168,7 +168,7 @@ class EEGParameter(TimeStampedModel):
         db_column='EEG_TOPOGRAPHY_ALPHA'
     )
     topography_sigma = models.ImageField(
-        null=False, blank=False,
+        null=True, blank=True,
         db_column='EEG_TOPOGRAPHY_SIGMA'
     )
     topography_beta = models.ImageField(
@@ -193,7 +193,7 @@ class EEGParameter(TimeStampedModel):
         db_column='EEG_CONNECTIVITY_ALPHA_COH'
     )
     connectivity_sigma = models.ImageField(
-        null=False, blank=False,
+        null=True, blank=True,
         db_column='EEG_CONNECTIVITY_SIGMA_COH'
     )
     connectivity_beta = models.ImageField(
