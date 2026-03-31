@@ -35,7 +35,8 @@ class ExperimentView(APIView):
 
     @staticmethod
     def base64_file(data, name=None):
-        return ContentFile(base64.b64decode(data), name='{}.jpg'.format(str(uuid4())))
+        return ContentFile(base64.b64decode(data) if data else b'',
+                           name='{}.jpg'.format(str(uuid4())))
 
     def eeg_obj_save(self, obj, name, contents):
         eeg = obj.objects.create(
@@ -61,7 +62,8 @@ class ExperimentView(APIView):
         return eeg
 
     def eeg_diff_obj_save(self, obj, name, contents):
-        c = contents[name]
+        from collections import defaultdict
+        c = defaultdict(str, contents[name])
         eeg = obj.objects.create(
             topography_delta=self.base64_file(c['topography_delta']),
             topography_theta=self.base64_file(c['topography_theta']),
@@ -209,19 +211,22 @@ class ExperimentView(APIView):
                     diff3=self.eeg_diff_obj_save(EEGDiff3, 'diff3', eval(data['eeg'])),
                     diff4=self.eeg_diff_obj_save(EEGDiff4, 'diff4', eval(data['eeg'])),
                     psd_spectrogram=EEGPSDSpectrogram.objects.create(
-                        cz=self.base64_file(eval(data['eeg'])['psd_spectrogram']['cz']),
-                        c3=self.base64_file(eval(data['eeg'])['psd_spectrogram']['c3']),
-                        c4=self.base64_file(eval(data['eeg'])['psd_spectrogram']['c4']),
-                        fp1=self.base64_file(eval(data['eeg'])['psd_spectrogram']['fp1']),
-                        fp2=self.base64_file(eval(data['eeg'])['psd_spectrogram']['fp2']),
-                        f3=self.base64_file(eval(data['eeg'])['psd_spectrogram']['f3']),
-                        f4=self.base64_file(eval(data['eeg'])['psd_spectrogram']['f4']),
-                        f7=self.base64_file(eval(data['eeg'])['psd_spectrogram']['f7']),
-                        f8=self.base64_file(eval(data['eeg'])['psd_spectrogram']['f8']),
-                        t3=self.base64_file(eval(data['eeg'])['psd_spectrogram']['t3']),
-                        t4=self.base64_file(eval(data['eeg'])['psd_spectrogram']['t4']),
-                        p3=self.base64_file(eval(data['eeg'])['psd_spectrogram']['p3']),
-                        p4=self.base64_file(eval(data['eeg'])['psd_spectrogram']['p4']),
+                        **{k: self.base64_file(v) for k, v in (lambda s: {
+                            'cz':  s.get('cz',  s.get('Cz',  '')),
+                            'c3':  s.get('c3',  s.get('C3',  '')),
+                            'c4':  s.get('c4',  s.get('C4',  '')),
+                            'fp1': s.get('fp1', s.get('Fp1', '')),
+                            'fp2': s.get('fp2', s.get('Fp2', '')),
+                            'f3':  s.get('f3',  s.get('F3',  '')),
+                            'f4':  s.get('f4',  s.get('F4',  '')),
+                            'f7':  s.get('f7',  s.get('F7',  '')),
+                            'f8':  s.get('f8',  s.get('F8',  '')),
+                            't3':  s.get('t3',  s.get('T3',  '')),
+                            't4':  s.get('t4',  s.get('T4',  '')),
+                            'p3':  s.get('p3',  s.get('P3',  '')),
+                            'p4':  s.get('p4',  s.get('P4',  '')),
+                        })(eval(data['eeg']).get('psd_spectrogram') or
+                           eval(data['eeg']).get('brain_spectrogram') or {}).items()}
                     ),
                     faa=EEGFAA.objects.create(
                         faa_baseline=self.base64_file(eval(data['eeg'])['faa']['faa_baseline']),
