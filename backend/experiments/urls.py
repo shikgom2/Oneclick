@@ -19,4 +19,9 @@ urlpatterns = [
         views.ExperimentListView().as_view(),
         name='list experiments'
     ),
+    path(
+        '<int:pk>/ai-report/',
+        views.AIReportView.as_view(),
+        name='ai report'
+    ),
 ]

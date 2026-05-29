@@ -85,6 +85,11 @@ class EEGSerializer(serializers.ModelSerializer):
     diff4 = EEGDiff4Serializer(read_only=True)
     faa = EEGFaaSerializer(read_only=True)
     psd_spectrogram = EEGPSDSpectrogramSerializer(read_only=True)
+    trigger = serializers.SerializerMethodField()
+
+    def get_trigger(self, obj):
+        exp = obj.experiments.first()
+        return exp.trigger if exp else None
 
     class Meta:
         model = EEG
@@ -105,6 +110,7 @@ class EEGSerializer(serializers.ModelSerializer):
             'faa',
             'psd_spectrogram',
             'note',
+            'trigger',
         )
 
 
