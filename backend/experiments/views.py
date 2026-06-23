@@ -198,6 +198,7 @@ class ExperimentView(APIView):
                 eeg = EEG.objects.create(
                     psd=eeg_data['psd'],
                     sleep_staging=eeg_data['sleep_staging'],
+                    spindle_coupling=eeg_data.get('spindle_coupling'),
                     frontal_limbic=EEGFrontalLimbic.objects.create(
                         delta=self.base64_file(eeg_data['frontal_limbic']['delta']),
                         theta=self.base64_file(eeg_data['frontal_limbic']['theta']),
@@ -271,13 +272,15 @@ class ExperimentView(APIView):
             sex = self.get_value(data, 'sex')
             measurement_date = self.get_value(data, 'measurement_date')
             trigger = self.get_value(data, 'trigger')
+            stimulus_info = self.get_value(data, 'stimulus_info')
 
             exp = Experiments(name=data['name'], age=age, birth=birth, sex=sex,
                               measurement_date=measurement_date,
                               hrv=hrv,
                               eeg=eeg,
                               report=report,
-                              trigger=trigger)
+                              trigger=trigger,
+                              stimulus_info=stimulus_info)
             exp.save()
             return Response(
                 {'result': 'Success!!'},

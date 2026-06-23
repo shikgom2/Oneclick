@@ -109,6 +109,7 @@ class EEGSerializer(serializers.ModelSerializer):
             'diff4',
             'faa',
             'psd_spectrogram',
+            'spindle_coupling',
             'note',
             'trigger',
         )

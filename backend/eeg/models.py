@@ -74,6 +74,11 @@ class EEG(TimeStampedModel):
     )
     
 
+    spindle_coupling = models.JSONField(
+        null=True, blank=True,
+        db_column='EEG_SPINDLE_COUPLING'
+    )
+
     note = models.TextField(
         null=True, blank=True,
         db_column='EEG_NOTE'
