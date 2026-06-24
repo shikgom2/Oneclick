@@ -64,6 +64,11 @@ class Experiments(TimeStampedModel):
         db_column='AI_REPORT'
     )
 
+    stimulus_info = models.TextField(
+        null=True, blank=True,
+        db_column='STIMULUS_INFO'
+    )
+
     class Meta:
         db_table = 'OC_EXPERIMENTS'
         ordering = ['-int_dt']
