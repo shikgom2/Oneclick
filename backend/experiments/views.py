@@ -936,7 +936,7 @@ class AIReportView(APIView):
         try:
             client = anthropic.Anthropic(api_key=api_key)
             message = client.messages.create(
-                model='claude-opus-4-6',
+                model='claude-opus-4-8',
                 max_tokens=16000,
                 messages=[{'role': 'user', 'content': prompt}]
             )
