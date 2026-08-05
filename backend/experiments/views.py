@@ -375,6 +375,29 @@ CONNECTIVITY_BANDS = ('delta', 'theta', 'alpha', 'sigma', 'beta', 'gamma')
 # 연결성 지표: (필드 접두어, 프롬프트에 쓸 이름)
 CONNECTIVITY_METRICS = (('connectivity', 'wPLI'), ('connectivity2', 'PLV'))
 
+# 연결성 변화를 추적할 단계. EEG 모델의 ForeignKey 이름과 같아야 한다.
+CONNECTIVITY_PHASES = (
+    ('baseline',     '기저선'),
+    ('stimulation1', '자극1'),
+    ('recovery1',    '회복1'),
+    ('stimulation2', '자극2'),
+    ('recovery2',    '회복2'),
+)
+
+# 대역별 생리적 의미. 일반인이 읽는 리포트라 AI 가 지어내지 않도록 근거를 고정한다.
+BAND_REFERENCE = {
+    'delta': '0.5~4Hz. 깊은 수면(N3, 서파수면)에서 우세. 뇌 회복과 기억 공고화에 관여하며, '
+             '깨어 있을 때 많이 보이면 졸음이나 각성 저하를 시사',
+    'theta': '4~8Hz. 졸음과 얕은 수면(N1)에서 우세. 기억 인출·명상 상태와도 관련',
+    'alpha': '8~13Hz. 눈을 감고 편안히 쉬는 각성 상태에서 후두엽 중심으로 우세. '
+             '눈을 뜨면 급격히 줄어드는 성질(alpha blocking)이 있어 이완 정도의 지표로 쓰임',
+    'sigma': '12~16Hz. 수면방추(sleep spindle) 대역. N2 수면의 표지이며 외부 자극 차단과 '
+             '기억 공고화에 관여',
+    'beta':  '13~30Hz. 각성·집중·인지 활동에서 증가. 과도하면 긴장이나 과각성을 시사',
+    'gamma': '30Hz 이상. 여러 뇌 영역의 정보 통합과 관련. 근육 활동(EMG) 잡음이 섞이기 쉬워 '
+             '해석에 주의가 필요',
+}
+
 # 매직바이트 → media_type. base64_file() 이 실제 포맷과 무관하게 '.jpg' 로 저장하므로
 # 확장자를 믿을 수 없다(내용은 matplotlib PNG인 경우가 대부분).
 _IMG_MAGIC = (
@@ -413,39 +436,67 @@ def _img_b64(field):
 
 
 def _collect_connectivity_blocks(exp):
-    """Baseline 연결성 figure 를 Claude 메시지 content 블록으로 만든다.
+    """연결성 figure 를 Claude 메시지 content 블록으로 만든다.
 
-    각 이미지 앞에 어떤 지표·대역인지 알리는 텍스트 블록을 붙여야 모델이 그림과
-    라벨을 짝지을 수 있다. 파일이 없는 대역은 조용히 건너뛴다.
+    대역 단위로 묶어서 보낸다 — 한 대역의 전 단계(기저선→자극→회복) figure 를
+    연달아 놓아야 모델이 단계별 변화를 비교할 수 있다. 지표(wPLI/PLV)는 같은 대역
+    안에서 이어 붙인다.
+
+    반환하는 labels 는 대역 단위이며, 각 항목에 그 대역에서 실제로 첨부된
+    (지표, 단계) 조합을 담는다. 프롬프트가 "있는 것만" 해석하도록 만들기 위함이다.
+    파일이 없는 조합은 건너뛴다(사유는 _img_b64 가 로그에 남긴다).
     """
     blocks, labels = [], []
-    baseline = getattr(getattr(exp, 'eeg', None), 'baseline', None)
-    if baseline is None:
-        logger.info('[AI리포트] eeg.baseline 이 없어 연결성 figure 를 첨부하지 않음')
+    eeg = getattr(exp, 'eeg', None)
+    if eeg is None:
+        logger.info('[AI리포트] eeg 가 없어 연결성 figure 를 첨부하지 않음')
         return blocks, labels
 
-    for prefix, metric in CONNECTIVITY_METRICS:
-        for band in CONNECTIVITY_BANDS:
-            data, media_type = _img_b64(getattr(baseline, f'{prefix}_{band}', None))
-            if not data:
-                continue
-            label = f'{metric} / {band}'
-            blocks.append({'type': 'text', 'text': f'[연결성 figure] {label} (Baseline)'})
-            blocks.append({
-                'type': 'image',
-                'source': {'type': 'base64', 'media_type': media_type, 'data': data},
-            })
-            labels.append({'metric': metric, 'band': band})
+    # 실제로 존재하는 단계만 추린다 (1-phase 세션은 baseline 만 있다).
+    phases = [(attr, ko, getattr(eeg, attr, None)) for attr, ko in CONNECTIVITY_PHASES]
+    phases = [(attr, ko, obj) for attr, ko, obj in phases if obj is not None]
+    if not phases:
+        logger.warning('[AI리포트] EEG 단계 객체가 하나도 없습니다. 해석 섹션이 빠집니다.')
+        return blocks, labels
 
-    total = len(CONNECTIVITY_METRICS) * len(CONNECTIVITY_BANDS)
+    attached = 0
+    for band in CONNECTIVITY_BANDS:
+        band_items = []          # 이 대역에서 실제로 붙은 (지표, 단계)
+        band_blocks = []
+        for prefix, metric in CONNECTIVITY_METRICS:
+            for attr, ko, obj in phases:
+                data, media_type = _img_b64(getattr(obj, f'{prefix}_{band}', None))
+                if not data:
+                    continue
+                band_blocks.append({
+                    'type': 'text',
+                    'text': f'[{band} / {metric} / {ko}({attr})]',
+                })
+                band_blocks.append({
+                    'type': 'image',
+                    'source': {'type': 'base64', 'media_type': media_type, 'data': data},
+                })
+                band_items.append({'metric': metric, 'phase': attr, 'phase_ko': ko})
+
+        if not band_items:
+            continue
+        # 대역 묶음 시작을 알려야 모델이 어디까지가 같은 대역인지 안다.
+        blocks.append({'type': 'text',
+                       'text': f'===== {band.upper()} 대역 연결성 figure ====='})
+        blocks.extend(band_blocks)
+        labels.append({'band': band, 'items': band_items})
+        attached += len(band_items)
+
+    total = len(CONNECTIVITY_METRICS) * len(CONNECTIVITY_BANDS) * len(phases)
     if labels:
-        logger.info('[AI리포트] 연결성 figure %d/%d개 첨부', len(labels), total)
+        logger.info('[AI리포트] 연결성 figure %d/%d개 첨부 (대역 %d개, 단계 %d개: %s)',
+                    attached, total, len(labels), len(phases),
+                    ', '.join(ko for _, ko, _ in phases))
     else:
         # 여기로 오면 프롬프트에 connectivity 스펙이 아예 안 들어가고,
         # 결과적으로 PDF 에서 해석 섹션이 통째로 빠진다.
-        logger.warning('[AI리포트] 연결성 figure 를 하나도 읽지 못했습니다 '
-                       '(baseline=%s). 해석 섹션이 리포트에서 빠집니다.',
-                       getattr(baseline, 'pk', '?'))
+        logger.warning('[AI리포트] 연결성 figure 를 하나도 읽지 못했습니다. '
+                       '해석 섹션이 리포트에서 빠집니다.')
     return blocks, labels
 
 
@@ -939,24 +990,34 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
             ', '.join(f"{k.capitalize()}={v}%" for k, v in pb.items())
         )
 
-    # 첨부된 연결성 figure 목록 → 프롬프트에 명시하고, 같은 순서로 해석을 요구한다.
+    # 첨부된 연결성 figure → 대역 단위로 "단계별 변화"를 해석하게 한다.
     conn_labels = conn_labels or []
     if conn_labels:
         conn_listing = '\n'.join(
-            f"  {i + 1}. {c['metric']} / {c['band']} 대역"
-            for i, c in enumerate(conn_labels)
+            f"  · {c['band']} — "
+            + ', '.join(f"{it['metric']}({it['phase_ko']})" for it in c['items'])
+            for c in conn_labels
+        )
+        band_ref = '\n'.join(
+            f"  · {c['band']}: {BAND_REFERENCE.get(c['band'], '')}"
+            for c in conn_labels
         )
         conn_data_block = f"""
-[첨부된 연결성 figure — 이 메시지에 이미지로 함께 전달됨 (모두 Baseline 구간)]
+[첨부된 연결성 figure — 이 메시지에 이미지로 함께 전달됨]
+  대역별로 묶여 있고, 각 이미지 앞에 [대역/지표/단계] 라벨이 붙어 있습니다.
 {conn_listing}
   ※ wPLI = weighted Phase Lag Index (위상지연 기반, 용적전도 영향에 강건)
   ※ PLV  = Phase Locking Value (위상동기화 강도)
+
+[대역별 생리적 의미 — 일반인 설명에 이 내용을 근거로 사용하세요]
+{band_ref}
 """
         conn_items = ',\n'.join(
             f"""    {{
-      "metric": "{c['metric']}",
       "band": "{c['band']}",
-      "interpretation": "첨부된 해당 figure에서 실제로 보이는 연결 패턴 서술 — 강한 연결이 나타나는 전극/영역 쌍, 좌우·전후 대칭성, 전체 연결 밀도 (150~200자)",
+      "band_role": "이 대역이 무엇을 반영하는지 일반인이 이해할 수 있게 설명 (60~90자)",
+      "phase_change": "첨부 figure에서 기저선→자극→회복으로 갈수록 연결 패턴이 실제로 어떻게 변하는지 (강해진/약해진 영역, 좌우·전후 대칭성, 전체 연결 밀도의 추이) (150~200자)",
+      "clinical_meaning": "그 변화가 이 피험자에게 갖는 의미 (100~150자)",
       "key_takeaway": "핵심 1문장 (60자 이내)"
     }}"""
             for c in conn_labels
@@ -967,9 +1028,14 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
   ]"""
         conn_rule = """
 [연결성 figure 해석 규칙]
+- 대역 하나당 항목 하나입니다. 위에 나열된 대역과 같은 순서·같은 개수로 작성하세요.
+- phase_change 가 핵심입니다. 기저선 한 장만 설명하지 말고 단계 간 '변화'를 서술하세요.
+  단계가 기저선뿐이면 변화 대신 기저 상태를 서술하고 그 사실을 명시하세요.
+- wPLI 와 PLV 를 각각 따로 설명하지 마세요. 하나의 통합된 서술로 쓰되, 두 지표가
+  서로 다른 경향을 보일 때만 그 차이를 짧게 언급하세요.
+- band_role 은 위 [대역별 생리적 의미]에 근거해 쓰고, 전문용어는 풀어서 쓰세요.
 - 첨부된 이미지를 실제로 보고 서술하세요. 그림에서 확인되지 않는 내용을 지어내지 마세요.
-- 판독이 어려운 figure는 interpretation에 "판독 불가"로 명시하고 이유를 적으세요.
-- connectivity 배열은 위에 나열된 figure와 같은 순서·같은 개수로 작성하세요.
+  판독이 어려우면 "판독 불가"로 명시하고 이유를 적으세요.
 """
     else:
         conn_data_block = ''
