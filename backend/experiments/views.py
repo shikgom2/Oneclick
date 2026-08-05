@@ -364,7 +364,7 @@ AI_REPORT_MODEL = 'claude-opus-5'
 # thinking 이 켜져 있으면 max_tokens 를 thinking 과 응답 본문이 나눠 쓴다.
 # 연결성 figure 해석이 12개까지 붙으면서 JSON 이 길어졌으므로 넉넉히 잡는다.
 # (16000 을 넘기면 스트리밍이 필요하다 — 호출부 참고)
-AI_REPORT_MAX_TOKENS = 32000
+AI_REPORT_MAX_TOKENS = 48000
 
 # AI 리포트에 figure 해석을 요청할 연결성 대역.
 # eeg_content_bulk 가 저장하는 6개 대역 전부. _collect_report_data 의 이미지 URL
@@ -1015,9 +1015,9 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
         conn_items = ',\n'.join(
             f"""    {{
       "band": "{c['band']}",
-      "band_role": "이 대역이 무엇을 반영하는지 일반인이 이해할 수 있게 설명 (60~90자)",
-      "phase_change": "첨부 figure에서 기저선→자극→회복으로 갈수록 연결 패턴이 실제로 어떻게 변하는지 (강해진/약해진 영역, 좌우·전후 대칭성, 전체 연결 밀도의 추이) (150~200자)",
-      "clinical_meaning": "그 변화가 이 피험자에게 갖는 의미 (100~150자)",
+      "band_role": "이 대역이 무엇을 반영하는지, 왜 이 피험자에게 중요한지 일반인이 이해할 수 있게 설명 (100~140자)",
+      "phase_change": "첨부 figure에서 기저선→자극→회복으로 갈수록 연결 패턴이 실제로 어떻게 변하는지. 단계를 하나씩 짚어가며 서술하고, 강해진/약해진 영역(전두-후두, 좌-우 등)과 전체 연결 밀도의 추이를 구체적으로 (280~380자)",
+      "clinical_meaning": "그 변화가 이 피험자에게 갖는 의미. 다른 지표(수면 구조, HRV)와 연결지어 해석하고, 정상 범위와 비교 (200~280자)",
       "key_takeaway": "핵심 1문장 (60자 이내)"
     }}"""
             for c in conn_labels
@@ -1046,6 +1046,9 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
 아래 피험자 데이터를 분석하여 NeuroTx Clinical Report 형식의 한국어 임상 보고서를 작성하고,
 반드시 아래 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 ※ 각 필드의 글자 수 제한을 반드시 준수하세요. 전체 응답이 JSON으로 완결되어야 합니다.
+※ 서술 깊이: 두루뭉술한 일반론 대신 이 피험자의 실제 수치를 인용해 근거를 대세요.
+   "양호합니다" 같은 평가만 쓰지 말고 어떤 값이 어느 기준에 비해 어떻다는 식으로 쓰세요.
+   데이터가 없는 항목은 없다고 명시하고, 그 때문에 무엇을 판단할 수 없는지도 적으세요.
 {conn_rule}
 
 === 피험자 데이터 ===
@@ -1066,8 +1069,8 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
 === 요청 JSON 구조 ===
 
 {{
-  "executive_summary": "3개 축(자율신경 반응성·수면 구조·기질적 프로파일) 종합 요약 (2~3문장, 200자 이내)",
-  "so_what": "임상적 시사점 — 신경생리학적 의미와 치료 전망 (2~3문장, 200자 이내)",
+  "executive_summary": "3개 축(자율신경 반응성·수면 구조·기질적 프로파일) 종합 요약. 각 축의 대표 수치를 근거로 인용할 것 (4~5문장, 350자 이내)",
+  "so_what": "임상적 시사점 — 신경생리학적 의미와 치료 전망 (3~4문장, 300자 이내)",
   "sections": [
     {{
       "number": "01",
@@ -1105,7 +1108,7 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
       "key_takeaway": "핵심 결론 1문장 (80자 이내)"
     }}
   ]{conn_json_block},
-  "concluding_remarks": "종합 결론, 치료 방향 핵심 메시지 (3~4문장, 300자 이내)"
+  "concluding_remarks": "종합 결론과 치료 방향. 근거가 된 핵심 수치를 짚고, 다음 단계 권고까지 (5~6문장, 500자 이내)"
 }}
 """
     return prompt
