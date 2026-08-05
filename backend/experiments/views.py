@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import anthropic
+import httpx
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
@@ -1156,8 +1157,22 @@ def _api_error_type(exc):
     return None
 
 
+class AIReportBudgetExceeded(Exception):
+    """생성이 시간 예산을 넘겼다. 남은 시간이 없으므로 재시도 대상이 아니다."""
+
+
 def _is_transient(exc):
     """다시 시도할 가치가 있는 에러인가."""
+    # 예산 초과는 우리가 스스로 끊은 것이다. 다시 시도할 시간이 없다는 뜻이므로
+    # 절대 재시도하면 안 된다. 아래 httpx 검사보다 먼저 와야 한다.
+    if isinstance(exc, AIReportBudgetExceeded):
+        return False
+    # 스트림 순회 중 연결이 끊기면 SDK 가 감싸주지 않아 raw httpx 예외가 그대로 온다.
+    # anthropic 이 APIConnectionError 를 만드는 곳은 _base_client 의 최초 요청 구간
+    # 네 군데뿐이고, _streaming.py 에는 httpx 예외를 잡는 except 가 아예 없다.
+    # 이걸 빠뜨리면 프록시가 유휴 커넥션을 끊는 흔한 경우가 재시도 없이 500 이 된다.
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
     if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
         return True
     if _api_error_type(exc) in _TRANSIENT_ERROR_TYPES:
@@ -1167,14 +1182,19 @@ def _is_transient(exc):
     return getattr(exc, 'status_code', None) in (408, 409, 429, 500, 502, 503, 504, 529)
 
 
-def _stream_ai_message(client, content):
+def _stream_ai_message(client, content, started=None):
     """스트리밍으로 리포트를 생성하되 일시적 실패는 지수 백오프로 재시도한다.
 
     SDK 의 자동 재시도(max_retries)는 요청을 보내는 단계의 실패만 덮는다. 여기서
     실제로 문제가 된 overloaded_error 는 HTTP 200 으로 스트림이 열린 뒤 SSE 이벤트로
     도착해서 자동 재시도 대상이 아니다. 그래서 호출 전체를 감싸 직접 재시도한다.
+
+    started 는 harakiri 시계의 기준점이다. figure 60장을 base64 로 인코딩하는
+    준비 단계도 harakiri 에 포함되므로 호출부에서 그 시작 시각을 넘겨야 예산이
+    실제와 맞는다. 안 넘기면 준비 시간만큼 예산을 과대평가한다.
     """
-    started = time.monotonic()
+    started = time.monotonic() if started is None else started
+    deadline = started + AI_REPORT_DEADLINE_SEC
     attempts = len(AI_REPORT_RETRY_WAITS) + 1
     for i in range(attempts):
         try:
@@ -1184,6 +1204,16 @@ def _stream_ai_message(client, content):
                 thinking={'type': 'adaptive'},
                 messages=[{'role': 'user', 'content': content}],
             ) as stream:
+                # get_final_message() 는 다 끝날 때까지 무한정 블록한다. 재시도 예산을
+                # 아무리 계산해도 정작 시작된 시도에 상한이 없으면 harakiri 로 워커가
+                # 죽는다(클라이언트는 503 조차 못 받는다). 이벤트를 직접 순회하면서
+                # 매번 마감을 확인해 실제 상한을 건다.
+                for _ in stream:
+                    if time.monotonic() > deadline:
+                        raise AIReportBudgetExceeded(
+                            f'생성이 시간 예산 {AI_REPORT_DEADLINE_SEC}초를 넘겼습니다.'
+                        )
+                # 위에서 이미 다 소비했으므로 누적된 메시지를 그대로 돌려준다.
                 return stream.get_final_message()
         except Exception as e:
             if i == attempts - 1 or not _is_transient(e):
@@ -1211,6 +1241,10 @@ class AIReportView(APIView):
     """AI 임상 리포트 생성 — DB 저장 없이 구조화 JSON 반환 (PDF는 클라이언트에서 생성)."""
 
     def post(self, request, pk):
+        # harakiri 시계는 요청이 워커에 들어온 순간부터 돈다. figure 60장을 base64 로
+        # 인코딩하는 준비 단계도 여기 포함되므로 시간 예산의 기준점을 맨 앞에 둔다.
+        started = time.monotonic()
+
         try:
             exp = Experiments.objects.select_related(
                 'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
@@ -1238,11 +1272,21 @@ class AIReportView(APIView):
 
         raw = ''
         try:
-            client = anthropic.Anthropic(api_key=api_key, max_retries=3)
+            # SDK 기본 read 타임아웃은 600초라 harakiri 안에서 아무 역할을 못 한다.
+            # 멈춘 스트림을 빨리 죽이도록 read 를 짧게 잡는다. 이건 "이벤트 사이
+            # 간격"의 상한이고, 전체 소요시간 상한은 _stream_ai_message 의 마감이
+            # 담당한다(httpx read 타임아웃은 chunk 마다 리셋되므로 총량을 못 막는다).
+            # max_retries=0 — SDK 자동 재시도는 예산을 모르고 시간을 쓴다.
+            # 재시도는 마감을 아는 _stream_ai_message 가 전담한다.
+            client = anthropic.Anthropic(
+                api_key=api_key,
+                max_retries=0,
+                timeout=httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0),
+            )
             # max_tokens 가 16000 을 넘으면 SDK 가 비스트리밍 요청을 거부한다
             # (긴 응답이 HTTP 타임아웃에 걸리기 때문). 스트리밍으로 받고 마지막에
             # 완성 메시지를 꺼낸다.
-            message = _stream_ai_message(client, content)
+            message = _stream_ai_message(client, content, started=started)
 
             # 안전 분류기가 요청을 거부하면 HTTP 200 에 빈/부분 content 가 온다.
             # content[0] 을 바로 읽으면 IndexError 로 떨어져 원인을 알 수 없다.
@@ -1275,6 +1319,15 @@ class AIReportView(APIView):
             return Response(
                 {'error': f'AI 응답 파싱 실패: {str(e)}', 'raw': raw[:500]},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except AIReportBudgetExceeded as e:
+            # 우리가 스스로 끊은 경우다. harakiri 로 워커가 죽는 것보다 이 편이 낫다.
+            # 워커가 죽으면 클라이언트는 아무 응답도 못 받는다.
+            logger.warning('AI 리포트 예산 초과 (exp=%s) — %s', pk, e)
+            return Response(
+                {'error': 'AI 리포트 생성이 제한 시간을 초과했습니다. '
+                          '잠시 후 다시 시도해 주세요.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         except Exception as e:
             # 재시도를 다 쓰고도 실패한 일시적 장애는 사용자가 "다시 눌러보면 된다"는
