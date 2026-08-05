@@ -368,8 +368,16 @@ AI_REPORT_MODEL = 'claude-opus-5'
 AI_REPORT_MAX_TOKENS = 48000
 
 # 일시적 실패(overloaded_error 등) 재시도. 대기 시간은 시도 사이 초 단위.
-# 총 4회 시도, 최대 26초를 추가로 기다린다 — uwsgi harakiri 안에 들어가야 한다.
 AI_REPORT_RETRY_WAITS = (3, 8, 15)
+
+# 재시도 전체가 uwsgi harakiri 안에서 끝나야 한다. harakiri 에 걸리면 워커가 죽어서
+# 클라이언트는 503 조차 못 받고 연결이 끊긴다(503 보다 나쁜 결과다). 그래서 재시도가
+# 성공하더라도 생성을 끝낼 시간이 안 남는다면 차라리 지금 포기하고 503 을 준다.
+# ini 의 harakiri 를 올렸다면 환경변수로 같이 올려야 효과가 있다.
+AI_REPORT_DEADLINE_SEC = int(os.environ.get('AI_REPORT_DEADLINE_SEC', '150'))
+
+# 리포트 생성 자체에 최소한 남겨둬야 하는 시간. 이만큼도 안 남으면 재시도 중단.
+AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get('AI_REPORT_MIN_GENERATION_SEC', '90'))
 
 # 재시도해도 되는 에러 타입. 서버 용량/일시 장애라 다시 던지면 성공할 수 있다.
 # 반대로 invalid_request_error 같은 건 몇 번을 보내도 똑같이 실패한다.
@@ -1160,6 +1168,7 @@ def _stream_ai_message(client, content):
     실제로 문제가 된 overloaded_error 는 HTTP 200 으로 스트림이 열린 뒤 SSE 이벤트로
     도착해서 자동 재시도 대상이 아니다. 그래서 호출 전체를 감싸 직접 재시도한다.
     """
+    started = time.monotonic()
     attempts = len(AI_REPORT_RETRY_WAITS) + 1
     for i in range(attempts):
         try:
@@ -1174,9 +1183,20 @@ def _stream_ai_message(client, content):
             if i == attempts - 1 or not _is_transient(e):
                 raise
             wait = AI_REPORT_RETRY_WAITS[i]
+            elapsed = time.monotonic() - started
+            # 재시도가 성공해도 생성을 끝낼 시간이 없으면 지금 포기하는 게 낫다.
+            # 계속 밀어붙이다 harakiri 에 걸리면 워커가 죽어 응답 자체가 사라진다.
+            if elapsed + wait + AI_REPORT_MIN_GENERATION_SEC > AI_REPORT_DEADLINE_SEC:
+                logger.warning(
+                    'AI 리포트 재시도 중단 — %.0f초 경과, 생성에 필요한 %d초를 '
+                    '확보할 수 없음 (예산 %d초, harakiri 회피)',
+                    elapsed, AI_REPORT_MIN_GENERATION_SEC, AI_REPORT_DEADLINE_SEC
+                )
+                raise
             logger.warning(
-                'AI 리포트 일시 실패(%s), %d초 후 재시도 %d/%d — %s',
-                _api_error_type(e) or type(e).__name__, wait, i + 1, attempts - 1, e
+                'AI 리포트 일시 실패(%s), %d초 후 재시도 %d/%d (%.0f초 경과) — %s',
+                _api_error_type(e) or type(e).__name__, wait, i + 1, attempts - 1,
+                elapsed, e
             )
             time.sleep(wait)
 
