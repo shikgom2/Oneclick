@@ -1,6 +1,7 @@
 # -*- coding:utf-8 -*-
 import base64
 import json
+import logging
 import os
 import anthropic
 from rest_framework.views import APIView
@@ -355,6 +356,8 @@ def _img_url(field):
     return None
 
 
+logger = logging.getLogger(__name__)
+
 # AI 임상 리포트 생성 모델.
 AI_REPORT_MODEL = 'claude-opus-5'
 
@@ -400,7 +403,12 @@ def _img_b64(field):
         media_type = next(
             (mt for magic, mt in _IMG_MAGIC if raw.startswith(magic)), 'image/png')
         return base64.b64encode(raw).decode('ascii'), media_type
-    except Exception:
+    except Exception as e:
+        # 조용히 넘기면 "해석이 왜 안 나오는지" 추적이 불가능하다.
+        # URL 은 웹서버가 서빙해도 Django 프로세스가 파일을 못 읽는 경우(경로/권한/
+        # 다른 볼륨)가 있어서 실패 사유를 반드시 남긴다.
+        logger.warning('[AI리포트] 연결성 figure 읽기 실패 (%s): %s: %s',
+                       getattr(field, 'name', '?'), type(e).__name__, e)
         return None, None
 
 
@@ -413,6 +421,7 @@ def _collect_connectivity_blocks(exp):
     blocks, labels = [], []
     baseline = getattr(getattr(exp, 'eeg', None), 'baseline', None)
     if baseline is None:
+        logger.info('[AI리포트] eeg.baseline 이 없어 연결성 figure 를 첨부하지 않음')
         return blocks, labels
 
     for prefix, metric in CONNECTIVITY_METRICS:
@@ -427,6 +436,16 @@ def _collect_connectivity_blocks(exp):
                 'source': {'type': 'base64', 'media_type': media_type, 'data': data},
             })
             labels.append({'metric': metric, 'band': band})
+
+    total = len(CONNECTIVITY_METRICS) * len(CONNECTIVITY_BANDS)
+    if labels:
+        logger.info('[AI리포트] 연결성 figure %d/%d개 첨부', len(labels), total)
+    else:
+        # 여기로 오면 프롬프트에 connectivity 스펙이 아예 안 들어가고,
+        # 결과적으로 PDF 에서 해석 섹션이 통째로 빠진다.
+        logger.warning('[AI리포트] 연결성 figure 를 하나도 읽지 못했습니다 '
+                       '(baseline=%s). 해석 섹션이 리포트에서 빠집니다.',
+                       getattr(baseline, 'pk', '?'))
     return blocks, labels
 
 
