@@ -355,6 +355,81 @@ def _img_url(field):
     return None
 
 
+# AI 임상 리포트 생성 모델.
+AI_REPORT_MODEL = 'claude-opus-5'
+
+# thinking 이 켜져 있으면 max_tokens 를 thinking 과 응답 본문이 나눠 쓴다.
+# 연결성 figure 해석이 12개까지 붙으면서 JSON 이 길어졌으므로 넉넉히 잡는다.
+# (16000 을 넘기면 스트리밍이 필요하다 — 호출부 참고)
+AI_REPORT_MAX_TOKENS = 32000
+
+# AI 리포트에 figure 해석을 요청할 연결성 대역.
+# eeg_content_bulk 가 저장하는 6개 대역 전부. _collect_report_data 의 이미지 URL
+# 목록은 sigma 를 빼고 5개만 담지만, sigma(12~16Hz)는 수면방추 대역이라 해석 가치가
+# 있어 figure 입력에는 포함한다.
+CONNECTIVITY_BANDS = ('delta', 'theta', 'alpha', 'sigma', 'beta', 'gamma')
+
+# 연결성 지표: (필드 접두어, 프롬프트에 쓸 이름)
+CONNECTIVITY_METRICS = (('connectivity', 'wPLI'), ('connectivity2', 'PLV'))
+
+# 매직바이트 → media_type. base64_file() 이 실제 포맷과 무관하게 '.jpg' 로 저장하므로
+# 확장자를 믿을 수 없다(내용은 matplotlib PNG인 경우가 대부분).
+_IMG_MAGIC = (
+    (b'\x89PNG\r\n\x1a\n', 'image/png'),
+    (b'\xff\xd8\xff',      'image/jpeg'),
+    (b'GIF8',              'image/gif'),
+)
+
+
+def _img_b64(field):
+    """ImageField → (base64 문자열, media_type). 없거나 비어 있으면 (None, None).
+
+    _img_url 은 URL만 돌려주기 때문에 모델이 그림을 볼 수 없다. Claude vision 입력용
+    으로는 파일 바이트를 직접 읽어 실어 보내야 한다.
+    """
+    try:
+        if not field or not field.name:
+            return None, None
+        field.open('rb')
+        try:
+            raw = field.read()
+        finally:
+            field.close()
+        if not raw:
+            return None, None
+        media_type = next(
+            (mt for magic, mt in _IMG_MAGIC if raw.startswith(magic)), 'image/png')
+        return base64.b64encode(raw).decode('ascii'), media_type
+    except Exception:
+        return None, None
+
+
+def _collect_connectivity_blocks(exp):
+    """Baseline 연결성 figure 를 Claude 메시지 content 블록으로 만든다.
+
+    각 이미지 앞에 어떤 지표·대역인지 알리는 텍스트 블록을 붙여야 모델이 그림과
+    라벨을 짝지을 수 있다. 파일이 없는 대역은 조용히 건너뛴다.
+    """
+    blocks, labels = [], []
+    baseline = getattr(getattr(exp, 'eeg', None), 'baseline', None)
+    if baseline is None:
+        return blocks, labels
+
+    for prefix, metric in CONNECTIVITY_METRICS:
+        for band in CONNECTIVITY_BANDS:
+            data, media_type = _img_b64(getattr(baseline, f'{prefix}_{band}', None))
+            if not data:
+                continue
+            label = f'{metric} / {band}'
+            blocks.append({'type': 'text', 'text': f'[연결성 figure] {label} (Baseline)'})
+            blocks.append({
+                'type': 'image',
+                'source': {'type': 'base64', 'media_type': media_type, 'data': data},
+            })
+            labels.append({'metric': metric, 'band': band})
+    return blocks, labels
+
+
 def _fmt(v, unit='', precision=2):
     """숫자 값을 안전하게 포맷. None이면 'N/A' 반환."""
     if v is None:
@@ -791,8 +866,13 @@ def _collect_report_data(exp) -> dict:
     }
 
 
-def _build_ai_prompt_json(data: dict) -> str:
-    """Claude에게 구조화된 JSON 리포트 반환을 요청하는 프롬프트."""
+def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
+    """Claude에게 구조화된 JSON 리포트 반환을 요청하는 프롬프트.
+
+    conn_labels 는 이 요청에 실제로 첨부된 연결성 figure 목록
+    ([{'metric': 'wPLI', 'band': 'delta'}, ...]). 첨부된 것만 해석을 요구해야
+    모델이 없는 그림을 지어내지 않는다.
+    """
     import json as _json
 
     patient = data['patient']
@@ -840,10 +920,48 @@ def _build_ai_prompt_json(data: dict) -> str:
             ', '.join(f"{k.capitalize()}={v}%" for k, v in pb.items())
         )
 
+    # 첨부된 연결성 figure 목록 → 프롬프트에 명시하고, 같은 순서로 해석을 요구한다.
+    conn_labels = conn_labels or []
+    if conn_labels:
+        conn_listing = '\n'.join(
+            f"  {i + 1}. {c['metric']} / {c['band']} 대역"
+            for i, c in enumerate(conn_labels)
+        )
+        conn_data_block = f"""
+[첨부된 연결성 figure — 이 메시지에 이미지로 함께 전달됨 (모두 Baseline 구간)]
+{conn_listing}
+  ※ wPLI = weighted Phase Lag Index (위상지연 기반, 용적전도 영향에 강건)
+  ※ PLV  = Phase Locking Value (위상동기화 강도)
+"""
+        conn_items = ',\n'.join(
+            f"""    {{
+      "metric": "{c['metric']}",
+      "band": "{c['band']}",
+      "interpretation": "첨부된 해당 figure에서 실제로 보이는 연결 패턴 서술 — 강한 연결이 나타나는 전극/영역 쌍, 좌우·전후 대칭성, 전체 연결 밀도 (150~200자)",
+      "key_takeaway": "핵심 1문장 (60자 이내)"
+    }}"""
+            for c in conn_labels
+        )
+        conn_json_block = f""",
+  "connectivity": [
+{conn_items}
+  ]"""
+        conn_rule = """
+[연결성 figure 해석 규칙]
+- 첨부된 이미지를 실제로 보고 서술하세요. 그림에서 확인되지 않는 내용을 지어내지 마세요.
+- 판독이 어려운 figure는 interpretation에 "판독 불가"로 명시하고 이유를 적으세요.
+- connectivity 배열은 위에 나열된 figure와 같은 순서·같은 개수로 작성하세요.
+"""
+    else:
+        conn_data_block = ''
+        conn_json_block = ''
+        conn_rule = ''
+
     prompt = f"""당신은 수면·자율신경계 분야의 전문 임상 신경생리학 AI입니다.
 아래 피험자 데이터를 분석하여 NeuroTx Clinical Report 형식의 한국어 임상 보고서를 작성하고,
 반드시 아래 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 ※ 각 필드의 글자 수 제한을 반드시 준수하세요. 전체 응답이 JSON으로 완결되어야 합니다.
+{conn_rule}
 
 === 피험자 데이터 ===
 
@@ -859,7 +977,7 @@ def _build_ai_prompt_json(data: dict) -> str:
 
 [EEG 데이터]
 {chr(10).join(eeg_lines) if eeg_lines else '  데이터 없음'}
-
+{conn_data_block}
 === 요청 JSON 구조 ===
 
 {{
@@ -901,7 +1019,7 @@ def _build_ai_prompt_json(data: dict) -> str:
       "content": "최적 자극 타이밍, 프로토콜 권고, 보조 요법, 단기·중기 예후 (200~250자)",
       "key_takeaway": "핵심 결론 1문장 (80자 이내)"
     }}
-  ],
+  ]{conn_json_block},
   "concluding_remarks": "종합 결론, 치료 방향 핵심 메시지 (3~4문장, 300자 이내)"
 }}
 """
@@ -931,16 +1049,47 @@ class AIReportView(APIView):
             )
 
         report_data = _collect_report_data(exp)
-        prompt = _build_ai_prompt_json(report_data)
+        conn_blocks, conn_labels = _collect_connectivity_blocks(exp)
+        prompt = _build_ai_prompt_json(report_data, conn_labels)
 
+        # 텍스트 프롬프트 뒤에 연결성 figure 를 라벨과 함께 이어 붙인다.
+        content = [{'type': 'text', 'text': prompt}] + conn_blocks
+
+        raw = ''
         try:
             client = anthropic.Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model='claude-opus-4-8',
-                max_tokens=16000,
-                messages=[{'role': 'user', 'content': prompt}]
-            )
-            raw = message.content[0].text.strip()
+            # max_tokens 가 16000 을 넘으면 SDK 가 비스트리밍 요청을 거부한다
+            # (긴 응답이 HTTP 타임아웃에 걸리기 때문). 스트리밍으로 받고 마지막에
+            # 완성 메시지를 꺼낸다.
+            with client.messages.stream(
+                model=AI_REPORT_MODEL,
+                max_tokens=AI_REPORT_MAX_TOKENS,
+                thinking={'type': 'adaptive'},
+                messages=[{'role': 'user', 'content': content}],
+            ) as stream:
+                message = stream.get_final_message()
+
+            # 안전 분류기가 요청을 거부하면 HTTP 200 에 빈/부분 content 가 온다.
+            # content[0] 을 바로 읽으면 IndexError 로 떨어져 원인을 알 수 없다.
+            if message.stop_reason == 'refusal':
+                detail = getattr(message.stop_details, 'category', None)
+                return Response(
+                    {'error': f'AI가 요청을 거부했습니다 (분류: {detail or "미상"}).'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            # thinking 이 켜져 있으면 content[0] 이 thinking 블록이라 .text 가 없다.
+            # 텍스트 블록을 골라서 읽어야 한다.
+            raw = next(
+                (b.text for b in message.content if b.type == 'text'), ''
+            ).strip()
+            if not raw:
+                return Response(
+                    {'error': f'AI 응답에 텍스트가 없습니다 '
+                              f'(stop_reason={message.stop_reason}).'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
             # 혹시 ```json ... ``` 블록이 있으면 제거
             if raw.startswith('```'):
                 raw = raw.split('```')[1]
