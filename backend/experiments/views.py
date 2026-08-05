@@ -427,13 +427,38 @@ _IMG_MAGIC = (
 )
 
 
-def _png_size(raw: bytes):
-    """PNG 헤더에서 (width, height). PNG 가 아니면 None.
+# JPEG 에서 프레임 크기를 담고 있는 SOFn 마커들. DHT/DRI 등 다른 세그먼트와
+# 구분해야 하므로 명시적으로 나열한다(0xC4 DHT, 0xC8 JPG, 0xCC DAC 는 제외).
+_JPEG_SOF = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                       0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
 
-    Pillow 없이 IHDR 청크만 읽는다 — 서버에 Pillow 가 없어도 계측이 죽지 않게.
+
+def _img_size(raw: bytes):
+    """이미지 바이트에서 (width, height). 판독 불가면 None.
+
+    Pillow 없이 헤더만 읽는다 — 서버에 Pillow 가 없어도 계측이 죽지 않게.
+    PNG 는 IHDR 청크, JPEG 는 SOFn 마커에서 치수를 얻는다.
     """
     if len(raw) >= 24 and raw[:8] == b'\x89PNG\r\n\x1a\n' and raw[12:16] == b'IHDR':
         return (int.from_bytes(raw[16:20], 'big'), int.from_bytes(raw[20:24], 'big'))
+
+    if len(raw) >= 4 and raw[:2] == b'\xff\xd8':
+        i = 2
+        while i + 9 < len(raw):
+            if raw[i] != 0xFF:          # 마커 정렬이 깨지면 다음 바이트부터 다시 찾는다
+                i += 1
+                continue
+            marker = raw[i + 1]
+            if marker in (0xFF, 0x01) or 0xD0 <= marker <= 0xD9:
+                i += 2                  # 패딩/RSTn/SOI/EOI 는 길이 필드가 없다
+                continue
+            if marker in _JPEG_SOF:
+                return (int.from_bytes(raw[i + 7:i + 9], 'big'),
+                        int.from_bytes(raw[i + 5:i + 7], 'big'))   # 높이가 먼저다
+            seg = int.from_bytes(raw[i + 2:i + 4], 'big')
+            if seg < 2:                 # 손상된 길이 — 무한루프 방지
+                return None
+            i += 2 + seg
     return None
 
 
@@ -465,7 +490,7 @@ def _img_b64(field, stats=None):
         media_type = next(
             (mt for magic, mt in _IMG_MAGIC if raw.startswith(magic)), 'image/png')
         if stats is not None:
-            stats.append((len(raw), _png_size(raw)))
+            stats.append((len(raw), _img_size(raw)))
         return base64.b64encode(raw).decode('ascii'), media_type
     except Exception as e:
         # 조용히 넘기면 "해석이 왜 안 나오는지" 추적이 불가능하다.
