@@ -193,3 +193,28 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 MEDIA_ROOT1 = os.path.join(BASE_DIR, 'build', 'icons')
+
+
+# Django 기본 로깅은 'django' 로거만 구성한다. experiments.views 처럼 앱 모듈에서
+# 만든 로거는 설정이 없어 루트(WARNING)로 떨어지고, logger.info 가 전부 조용히
+# 버려진다. AI 리포트의 계측 로그(토큰 수, 이미지 크기, 소요 시간)가 안 보이던
+# 이유다. 해당 앱 로거만 INFO 로 올린다 — 다른 앱 로그는 그대로 둔다.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,      # Django 자체 로거를 죽이지 않는다
+    'formatters': {
+        # 구분자는 ASCII 로 둔다. uwsgi stderr 인코딩이 UTF-8 이 아닌 환경에서
+        # 유니코드 대시가 이스케이프되어 로그가 지저분해지는 걸 피한다.
+        'simple': {'format': '[%(levelname)s] %(asctime)s %(name)s | %(message)s'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'loggers': {
+        'experiments': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,             # 루트로 다시 올라가 중복 출력되지 않게
+        },
+    },
+}
