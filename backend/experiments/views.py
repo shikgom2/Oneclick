@@ -1,5 +1,6 @@
 # -*- coding:utf-8 -*-
 import base64
+import io
 import json
 import logging
 import os
@@ -368,6 +369,15 @@ AI_REPORT_MODEL = 'claude-opus-5'
 # (16000 을 넘기면 스트리밍이 필요하다 — 호출부 참고)
 AI_REPORT_MAX_TOKENS = 48000
 
+# 요청당 이미지 상한. 실측(exp 698, 370x370 JPEG):
+#   60장 FAIL / 30장 FAIL / 18장 OK / 6장 OK, 512px 로 줄여도 60장이면 FAIL.
+# 픽셀량이 아니라 장수가 원인이었다(60장 다 합쳐도 시각 토큰 약 1만).
+# 초과분은 overloaded_error 로 거절되므로 대역별 격자 합성으로 6장까지 내린다.
+AI_REPORT_MAX_IMAGES = 20
+
+# 합성 이미지 장변 상한. 이보다 크면 API 가 어차피 축소하므로 미리 줄여 보낸다.
+AI_REPORT_IMAGE_MAX_EDGE = 1568
+
 # 일시적 실패(overloaded_error 등) 재시도. 대기 시간은 시도 사이 초 단위.
 AI_REPORT_RETRY_WAITS = (3, 8, 15)
 
@@ -467,15 +477,16 @@ def _vision_tokens(w: int, h: int) -> int:
     return int(w * h / 750)
 
 
-def _img_b64(field, stats=None):
-    """ImageField → (base64 문자열, media_type). 없거나 비어 있으면 (None, None).
+def _img_raw(field, stats=None):
+    """ImageField → (원본 바이트, media_type). 없거나 비어 있으면 (None, None).
 
     stats 를 주면 (바이트수, (가로,세로)|None) 을 append 한다. 요청 무게를 판단하려면
     실측이 필요한데 지금은 관측 수단이 전혀 없다. 모듈 전역 대신 호출자가 리스트를
     넘기는 방식이라 요청끼리 섞이지 않는다.
 
     _img_url 은 URL만 돌려주기 때문에 모델이 그림을 볼 수 없다. Claude vision 입력용
-    으로는 파일 바이트를 직접 읽어 실어 보내야 한다.
+    으로는 파일 바이트를 직접 읽어 실어 보내야 한다. base64 인코딩은 호출부에서
+    한다 — 합성용으로 원본 바이트가 필요하기 때문이다.
     """
     try:
         if not field or not field.name:
@@ -491,7 +502,7 @@ def _img_b64(field, stats=None):
             (mt for magic, mt in _IMG_MAGIC if raw.startswith(magic)), 'image/png')
         if stats is not None:
             stats.append((len(raw), _img_size(raw)))
-        return base64.b64encode(raw).decode('ascii'), media_type
+        return raw, media_type
     except Exception as e:
         # 조용히 넘기면 "해석이 왜 안 나오는지" 추적이 불가능하다.
         # URL 은 웹서버가 서빙해도 Django 프로세스가 파일을 못 읽는 경우(경로/권한/
@@ -501,16 +512,62 @@ def _img_b64(field, stats=None):
         return None, None
 
 
+def _compose_grid(rows):
+    """[[bytes|None, ...], ...] 를 한 장의 격자 이미지로 합쳐 JPEG 바이트로 준다.
+
+    반환: (jpeg 바이트, (가로, 세로)) 또는 None.
+
+    figure 를 한 장씩 따로 보내면 API 의 요청당 이미지 상한(20장)에 걸린다.
+    실측: 60장·30장은 overloaded_error 로 거절, 18장·6장은 통과. 그림이
+    370x370 이라 픽셀량은 문제가 아니었고(60장 합쳐도 약 1만 토큰) 순전히
+    장수가 문제였다. 대역마다 지표 x 단계 격자로 합치면 6장으로 내려간다.
+    덤으로 단계별 변화를 나란히 놓게 되어 비교 해석에도 유리하다.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.error('[AI리포트] Pillow 가 없어 figure 합성 불가 — 낱장으로 보냅니다.')
+        return None
+    try:
+        tiles = [[Image.open(io.BytesIO(c)).convert('RGB') if c else None for c in row]
+                 for row in rows]
+        sizes = [t.size for row in tiles for t in row if t is not None]
+        if not sizes:
+            return None
+        # 타일 크기가 섞여 있어도 격자가 어긋나지 않게 최대치에 맞춘다.
+        tw = max(w for w, _ in sizes)
+        th = max(h for _, h in sizes)
+        ncol = max(len(r) for r in rows)
+        canvas = Image.new('RGB', (tw * ncol, th * len(rows)), (255, 255, 255))
+        for r, row in enumerate(tiles):
+            for c, t in enumerate(row):
+                if t is None:
+                    continue          # 빠진 조합은 흰 칸으로 둔다
+                if t.size != (tw, th):
+                    t = t.resize((tw, th))
+                canvas.paste(t, (c * tw, r * th))
+        # 장변이 이보다 크면 API 가 어차피 줄인다. 미리 줄여 바이트를 아낀다.
+        if max(canvas.size) > AI_REPORT_IMAGE_MAX_EDGE:
+            canvas.thumbnail((AI_REPORT_IMAGE_MAX_EDGE, AI_REPORT_IMAGE_MAX_EDGE))
+        buf = io.BytesIO()
+        canvas.save(buf, 'JPEG', quality=90)
+        return buf.getvalue(), canvas.size
+    except Exception as e:
+        logger.error('[AI리포트] figure 합성 실패 (%s: %s) — 낱장으로 보냅니다.',
+                     type(e).__name__, e)
+        return None
+
+
 def _collect_connectivity_blocks(exp):
     """연결성 figure 를 Claude 메시지 content 블록으로 만든다.
 
-    대역 단위로 묶어서 보낸다 — 한 대역의 전 단계(기저선→자극→회복) figure 를
-    연달아 놓아야 모델이 단계별 변화를 비교할 수 있다. 지표(wPLI/PLV)는 같은 대역
-    안에서 이어 붙인다.
+    대역마다 "지표(행) x 단계(열)" 격자 한 장으로 합쳐서 보낸다. 낱장으로 보내면
+    6대역 x 2지표 x 5단계 = 60장이 되어 API 의 요청당 이미지 상한에 걸린다.
+    합치면 6장이고, 한 대역의 전 단계가 한 화면에 놓여 변화를 비교하기도 쉽다.
 
     반환하는 labels 는 대역 단위이며, 각 항목에 그 대역에서 실제로 첨부된
     (지표, 단계) 조합을 담는다. 프롬프트가 "있는 것만" 해석하도록 만들기 위함이다.
-    파일이 없는 조합은 건너뛴다(사유는 _img_b64 가 로그에 남긴다).
+    파일이 없는 조합은 건너뛴다(사유는 _img_raw 가 로그에 남긴다).
     """
     blocks, labels = [], []
     eeg = getattr(exp, 'eeg', None)
@@ -529,49 +586,87 @@ def _collect_connectivity_blocks(exp):
     img_stats = []           # (바이트수, (가로,세로)|None) — 요청 무게 계측용
     for band in CONNECTIVITY_BANDS:
         band_items = []          # 이 대역에서 실제로 붙은 (지표, 단계)
-        band_blocks = []
+        grid_rows, row_labels = [], []
         for prefix, metric in CONNECTIVITY_METRICS:
+            row, present = [], False
             for attr, ko, obj in phases:
-                data, media_type = _img_b64(
-                    getattr(obj, f'{prefix}_{band}', None), stats=img_stats)
-                if not data:
-                    continue
-                band_blocks.append({
-                    'type': 'text',
-                    'text': f'[{band} / {metric} / {ko}({attr})]',
-                })
-                band_blocks.append({
-                    'type': 'image',
-                    'source': {'type': 'base64', 'media_type': media_type, 'data': data},
-                })
-                band_items.append({'metric': metric, 'phase': attr, 'phase_ko': ko})
+                raw, _ = _img_raw(getattr(obj, f'{prefix}_{band}', None), stats=img_stats)
+                row.append(raw)
+                if raw:
+                    present = True
+                    band_items.append({'metric': metric, 'phase': attr, 'phase_ko': ko})
+            if present:      # 통째로 빈 행은 격자에서 뺀다 (흰 줄만 남으므로)
+                grid_rows.append(row)
+                row_labels.append((metric, row))
 
         if not band_items:
             continue
-        # 대역 묶음 시작을 알려야 모델이 어디까지가 같은 대역인지 안다.
-        blocks.append({'type': 'text',
-                       'text': f'===== {band.upper()} 대역 연결성 figure ====='})
-        blocks.extend(band_blocks)
+
+        composed = _compose_grid(grid_rows)
+        col_names = ', '.join(ko for _, ko, _ in phases)
+        if composed:
+            jpeg, (gw, gh) = composed
+            # 격자 배치를 글로 정확히 알려줘야 모델이 어느 칸이 무엇인지 안다.
+            # 그림 위에 글자를 그리지 않는 이유는 서버에 한글 폰트를 보장할 수
+            # 없기 때문이다.
+            rows_desc = '\n'.join(
+                '  %d행 %s: %s' % (
+                    i + 1, metric,
+                    ', '.join(ko if r[j] else f'{ko}(없음)'
+                              for j, (_, ko, _) in enumerate(phases)))
+                for i, (metric, r) in enumerate(row_labels)
+            )
+            blocks.append({'type': 'text', 'text':
+                f'===== {band.upper()} 대역 연결성 figure =====\n'
+                f'아래 그림 한 장은 {len(grid_rows)}행 {len(phases)}열 격자입니다. '
+                f'각 칸이 개별 figure 입니다.\n'
+                f'  열 순서(왼쪽→오른쪽): {col_names}\n'
+                f'{rows_desc}'})
+            blocks.append({'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/jpeg',
+                'data': base64.b64encode(jpeg).decode('ascii')}})
+            logger.info('[AI리포트] %s 대역 격자 %dx%d 합성 → %dx%dpx, %.0fKB',
+                        band, len(grid_rows), len(phases), gw, gh, len(jpeg) / 1024)
+        else:
+            # 합성 실패 — 낱장으로 보낸다. 상한을 넘으면 아래에서 경고가 뜬다.
+            blocks.append({'type': 'text',
+                           'text': f'===== {band.upper()} 대역 연결성 figure ====='})
+            for metric, row in row_labels:
+                for (attr, ko, _), raw in zip(phases, row):
+                    if not raw:
+                        continue
+                    blocks.append({'type': 'text',
+                                   'text': f'[{band} / {metric} / {ko}({attr})]'})
+                    blocks.append({'type': 'image', 'source': {
+                        'type': 'base64', 'media_type': 'image/jpeg',
+                        'data': base64.b64encode(raw).decode('ascii')}})
+
         labels.append({'band': band, 'items': band_items})
         attached += len(band_items)
+
+    n_images = sum(1 for x in blocks if x['type'] == 'image')
+    if n_images > AI_REPORT_MAX_IMAGES:
+        # 실측상 이 상한을 넘으면 API 가 overloaded_error 로 거절한다.
+        logger.error('[AI리포트] 이미지 %d장 — API 상한 %d장을 넘습니다. '
+                     '합성이 실패했을 가능성이 큽니다(위 로그 확인). 요청이 거절될 수 있습니다.',
+                     n_images, AI_REPORT_MAX_IMAGES)
 
     total = len(CONNECTIVITY_METRICS) * len(CONNECTIVITY_BANDS) * len(phases)
     if labels:
         logger.info('[AI리포트] 연결성 figure %d/%d개 첨부 (대역 %d개, 단계 %d개: %s)',
                     attached, total, len(labels), len(phases),
                     ', '.join(ko for _, ko, _ in phases))
-        # 요청 무게를 숫자로 남긴다. 그림 크기를 줄일지 말지는 추정이 아니라
-        # 이 로그를 보고 판단해야 한다.
-        sizes = [wh for _, wh in img_stats if wh]
-        mb = sum(n for n, _ in img_stats) / 1024 / 1024
-        if sizes:
-            vt = sum(_vision_tokens(w, h) for w, h in sizes)
-            wmax = max(max(w, h) for w, h in sizes)
-            logger.info('[AI리포트] 이미지 %.1fMB, 시각 토큰 약 %d (장변 최대 %dpx, '
-                        '치수 판독 %d/%d장)',
-                        mb, vt, wmax, len(sizes), len(img_stats))
-        else:
-            logger.info('[AI리포트] 이미지 %.1fMB (PNG 가 아니라 치수 판독 불가)', mb)
+        # 원본 타일과 실제 전송분을 나눠서 남긴다. 둘을 섞으면 합성이 제대로
+        # 됐는지 로그만 보고 판단할 수 없다.
+        src_mb = sum(n for n, _ in img_stats) / 1024 / 1024
+        src_sizes = [wh for _, wh in img_stats if wh]
+        src_edge = max(max(w, h) for w, h in src_sizes) if src_sizes else 0
+        sent_mb = sum(len(x['source']['data'])
+                      for x in blocks if x['type'] == 'image') / 1024 / 1024
+        logger.info('[AI리포트] 원본 figure %d개 %.1fMB(장변 %dpx) → '
+                    '전송 이미지 %d장 %.1fMB (API 상한 %d장)',
+                    len(img_stats), src_mb, src_edge,
+                    n_images, sent_mb, AI_REPORT_MAX_IMAGES)
     else:
         # 여기로 오면 프롬프트에 connectivity 스펙이 아예 안 들어가고,
         # 결과적으로 PDF 에서 해석 섹션이 통째로 빠진다.
@@ -1084,7 +1179,10 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
         )
         conn_data_block = f"""
 [첨부된 연결성 figure — 이 메시지에 이미지로 함께 전달됨]
-  대역별로 묶여 있고, 각 이미지 앞에 [대역/지표/단계] 라벨이 붙어 있습니다.
+  대역마다 그림 "한 장"이 오고, 그 한 장이 격자입니다.
+  행 = 지표(wPLI/PLV), 열 = 단계(기저선→자극→회복 순).
+  각 그림 바로 앞의 텍스트에 그 격자의 행·열 구성이 적혀 있으니 그대로 따르세요.
+  같은 행에서 왼쪽→오른쪽으로 읽으면 그것이 단계별 변화입니다.
 {conn_listing}
   ※ wPLI = weighted Phase Lag Index (위상지연 기반, 용적전도 영향에 강건)
   ※ PLV  = Phase Locking Value (위상동기화 강도)
@@ -1116,6 +1214,9 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
 - band_role 은 위 [대역별 생리적 의미]에 근거해 쓰고, 전문용어는 풀어서 쓰세요.
 - 첨부된 이미지를 실제로 보고 서술하세요. 그림에서 확인되지 않는 내용을 지어내지 마세요.
   판독이 어려우면 "판독 불가"로 명시하고 이유를 적으세요.
+- 각 그림은 격자입니다. 같은 행(같은 지표)에서 열을 왼쪽부터 차례로 비교해야
+  단계별 변화가 보입니다. 격자 안에 흰 칸이 있으면 그 조합은 데이터가 없다는 뜻이니
+  없는 것으로 취급하세요.
 """
     else:
         conn_data_block = ''
