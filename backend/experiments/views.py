@@ -427,8 +427,27 @@ _IMG_MAGIC = (
 )
 
 
-def _img_b64(field):
+def _png_size(raw: bytes):
+    """PNG 헤더에서 (width, height). PNG 가 아니면 None.
+
+    Pillow 없이 IHDR 청크만 읽는다 — 서버에 Pillow 가 없어도 계측이 죽지 않게.
+    """
+    if len(raw) >= 24 and raw[:8] == b'\x89PNG\r\n\x1a\n' and raw[12:16] == b'IHDR':
+        return (int.from_bytes(raw[16:20], 'big'), int.from_bytes(raw[20:24], 'big'))
+    return None
+
+
+def _vision_tokens(w: int, h: int) -> int:
+    """Claude vision 입력 토큰 근사치 = (가로 x 세로) / 750."""
+    return int(w * h / 750)
+
+
+def _img_b64(field, stats=None):
     """ImageField → (base64 문자열, media_type). 없거나 비어 있으면 (None, None).
+
+    stats 를 주면 (바이트수, (가로,세로)|None) 을 append 한다. 요청 무게를 판단하려면
+    실측이 필요한데 지금은 관측 수단이 전혀 없다. 모듈 전역 대신 호출자가 리스트를
+    넘기는 방식이라 요청끼리 섞이지 않는다.
 
     _img_url 은 URL만 돌려주기 때문에 모델이 그림을 볼 수 없다. Claude vision 입력용
     으로는 파일 바이트를 직접 읽어 실어 보내야 한다.
@@ -445,6 +464,8 @@ def _img_b64(field):
             return None, None
         media_type = next(
             (mt for magic, mt in _IMG_MAGIC if raw.startswith(magic)), 'image/png')
+        if stats is not None:
+            stats.append((len(raw), _png_size(raw)))
         return base64.b64encode(raw).decode('ascii'), media_type
     except Exception as e:
         # 조용히 넘기면 "해석이 왜 안 나오는지" 추적이 불가능하다.
@@ -480,12 +501,14 @@ def _collect_connectivity_blocks(exp):
         return blocks, labels
 
     attached = 0
+    img_stats = []           # (바이트수, (가로,세로)|None) — 요청 무게 계측용
     for band in CONNECTIVITY_BANDS:
         band_items = []          # 이 대역에서 실제로 붙은 (지표, 단계)
         band_blocks = []
         for prefix, metric in CONNECTIVITY_METRICS:
             for attr, ko, obj in phases:
-                data, media_type = _img_b64(getattr(obj, f'{prefix}_{band}', None))
+                data, media_type = _img_b64(
+                    getattr(obj, f'{prefix}_{band}', None), stats=img_stats)
                 if not data:
                     continue
                 band_blocks.append({
@@ -512,6 +535,18 @@ def _collect_connectivity_blocks(exp):
         logger.info('[AI리포트] 연결성 figure %d/%d개 첨부 (대역 %d개, 단계 %d개: %s)',
                     attached, total, len(labels), len(phases),
                     ', '.join(ko for _, ko, _ in phases))
+        # 요청 무게를 숫자로 남긴다. 그림 크기를 줄일지 말지는 추정이 아니라
+        # 이 로그를 보고 판단해야 한다.
+        sizes = [wh for _, wh in img_stats if wh]
+        mb = sum(n for n, _ in img_stats) / 1024 / 1024
+        if sizes:
+            vt = sum(_vision_tokens(w, h) for w, h in sizes)
+            wmax = max(max(w, h) for w, h in sizes)
+            logger.info('[AI리포트] 이미지 %.1fMB, 시각 토큰 약 %d (장변 최대 %dpx, '
+                        '치수 판독 %d/%d장)',
+                        mb, vt, wmax, len(sizes), len(img_stats))
+        else:
+            logger.info('[AI리포트] 이미지 %.1fMB (PNG 가 아니라 치수 판독 불가)', mb)
     else:
         # 여기로 오면 프롬프트에 connectivity 스펙이 아예 안 들어가고,
         # 결과적으로 PDF 에서 해석 섹션이 통째로 빠진다.
@@ -1288,12 +1323,38 @@ class AIReportView(APIView):
             # 완성 메시지를 꺼낸다.
             message = _stream_ai_message(client, content, started=started)
 
+            # 생성 규모를 관측할 수단이 지금까지 전혀 없었다. max_tokens 나 예산을
+            # 조정하려면 실제 토큰 수와 소요 시간을 알아야 한다.
+            usage = getattr(message, 'usage', None)
+            logger.info(
+                '[AI리포트] 완료 exp=%s stop=%s 입력=%s 출력=%s 소요=%.0f초',
+                pk, message.stop_reason,
+                getattr(usage, 'input_tokens', '?'),
+                getattr(usage, 'output_tokens', '?'),
+                time.monotonic() - started,
+            )
+
             # 안전 분류기가 요청을 거부하면 HTTP 200 에 빈/부분 content 가 온다.
             # content[0] 을 바로 읽으면 IndexError 로 떨어져 원인을 알 수 없다.
             if message.stop_reason == 'refusal':
                 detail = getattr(message.stop_details, 'category', None)
                 return Response(
                     {'error': f'AI가 요청을 거부했습니다 (분류: {detail or "미상"}).'},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            # 토큰 한도에서 잘리면 JSON 이 미완결이라 아래 json.loads 가 실패한다.
+            # 그러면 "AI 응답 파싱 실패" 로 뜨는데, 프롬프트나 파서 버그로 오인하기
+            # 딱 좋다. 실제 원인은 분량 초과이므로 여기서 구분해서 알려준다.
+            if message.stop_reason == 'max_tokens':
+                logger.error(
+                    '[AI리포트] 응답이 max_tokens(%d)에서 잘림 — 출력 %s 토큰. '
+                    '첨부 figure 를 줄이거나 max_tokens 를 올려야 한다.',
+                    AI_REPORT_MAX_TOKENS, getattr(usage, 'output_tokens', '?')
+                )
+                return Response(
+                    {'error': 'AI 응답이 토큰 한도에서 잘렸습니다. '
+                              '관리자에게 문의해 주세요.'},
                     status=status.HTTP_502_BAD_GATEWAY
                 )
 
@@ -1327,17 +1388,21 @@ class AIReportView(APIView):
             return Response(
                 {'error': 'AI 리포트 생성이 제한 시간을 초과했습니다. '
                           '잠시 후 다시 시도해 주세요.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                headers={'Retry-After': '30'}
             )
         except Exception as e:
             # 재시도를 다 쓰고도 실패한 일시적 장애는 사용자가 "다시 눌러보면 된다"는
             # 걸 알 수 있게 원인을 구분해서 알려준다.
             if _is_transient(e):
                 logger.warning('AI 리포트 일시 장애로 최종 실패 — %s', e)
+                # Retry-After 가 없으면 사용자가 곧바로 다시 눌러 워커를 또 물린다.
+                # 과부하가 몇 분 이어지는 동안 이 사이클이 반복된다.
                 return Response(
                     {'error': 'AI 서버가 일시적으로 혼잡합니다. '
-                              '잠시 후 다시 시도해 주세요.'},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                              '30초쯤 뒤에 다시 시도해 주세요.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    headers={'Retry-After': '30'}
                 )
             logger.exception('AI 리포트 생성 실패 (exp=%s)', pk)
             return Response(
