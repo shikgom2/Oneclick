@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import time
 import anthropic
 from rest_framework.views import APIView
 from rest_framework import status
@@ -365,6 +366,16 @@ AI_REPORT_MODEL = 'claude-opus-5'
 # 연결성 figure 해석이 12개까지 붙으면서 JSON 이 길어졌으므로 넉넉히 잡는다.
 # (16000 을 넘기면 스트리밍이 필요하다 — 호출부 참고)
 AI_REPORT_MAX_TOKENS = 48000
+
+# 일시적 실패(overloaded_error 등) 재시도. 대기 시간은 시도 사이 초 단위.
+# 총 4회 시도, 최대 26초를 추가로 기다린다 — uwsgi harakiri 안에 들어가야 한다.
+AI_REPORT_RETRY_WAITS = (3, 8, 15)
+
+# 재시도해도 되는 에러 타입. 서버 용량/일시 장애라 다시 던지면 성공할 수 있다.
+# 반대로 invalid_request_error 같은 건 몇 번을 보내도 똑같이 실패한다.
+_TRANSIENT_ERROR_TYPES = frozenset({
+    'overloaded_error', 'api_error', 'rate_limit_error', 'timeout_error',
+})
 
 # AI 리포트에 figure 해석을 요청할 연결성 대역.
 # eeg_content_bulk 가 저장하는 6개 대역 전부. _collect_report_data 의 이미지 URL
@@ -1114,6 +1125,62 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
     return prompt
 
 
+def _api_error_type(exc):
+    """anthropic 예외에서 에러 타입 문자열을 뽑는다.
+
+    body 모양이 두 가지다. HTTP 상태코드로 온 에러는 {'type': 'overloaded_error', ...},
+    스트림 중간에 SSE 로 온 에러는 {'type': 'error', 'error': {'type': ...}} 로 한 겹
+    더 감싸여 있다. 둘 다 처리한다.
+    """
+    body = getattr(exc, 'body', None)
+    if isinstance(body, dict):
+        inner = body.get('error')
+        if isinstance(inner, dict) and inner.get('type'):
+            return inner['type']
+        if body.get('type') and body['type'] != 'error':
+            return body['type']
+    return None
+
+
+def _is_transient(exc):
+    """다시 시도할 가치가 있는 에러인가."""
+    if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+        return True
+    if _api_error_type(exc) in _TRANSIENT_ERROR_TYPES:
+        return True
+    # 스트림 도중 에러는 HTTP 자체가 200 으로 열린 뒤라 status_code 가 200 이다.
+    # 그래서 상태코드는 보조 판단으로만 쓴다.
+    return getattr(exc, 'status_code', None) in (408, 409, 429, 500, 502, 503, 504, 529)
+
+
+def _stream_ai_message(client, content):
+    """스트리밍으로 리포트를 생성하되 일시적 실패는 지수 백오프로 재시도한다.
+
+    SDK 의 자동 재시도(max_retries)는 요청을 보내는 단계의 실패만 덮는다. 여기서
+    실제로 문제가 된 overloaded_error 는 HTTP 200 으로 스트림이 열린 뒤 SSE 이벤트로
+    도착해서 자동 재시도 대상이 아니다. 그래서 호출 전체를 감싸 직접 재시도한다.
+    """
+    attempts = len(AI_REPORT_RETRY_WAITS) + 1
+    for i in range(attempts):
+        try:
+            with client.messages.stream(
+                model=AI_REPORT_MODEL,
+                max_tokens=AI_REPORT_MAX_TOKENS,
+                thinking={'type': 'adaptive'},
+                messages=[{'role': 'user', 'content': content}],
+            ) as stream:
+                return stream.get_final_message()
+        except Exception as e:
+            if i == attempts - 1 or not _is_transient(e):
+                raise
+            wait = AI_REPORT_RETRY_WAITS[i]
+            logger.warning(
+                'AI 리포트 일시 실패(%s), %d초 후 재시도 %d/%d — %s',
+                _api_error_type(e) or type(e).__name__, wait, i + 1, attempts - 1, e
+            )
+            time.sleep(wait)
+
+
 class AIReportView(APIView):
     """AI 임상 리포트 생성 — DB 저장 없이 구조화 JSON 반환 (PDF는 클라이언트에서 생성)."""
 
@@ -1145,17 +1212,11 @@ class AIReportView(APIView):
 
         raw = ''
         try:
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key, max_retries=3)
             # max_tokens 가 16000 을 넘으면 SDK 가 비스트리밍 요청을 거부한다
             # (긴 응답이 HTTP 타임아웃에 걸리기 때문). 스트리밍으로 받고 마지막에
             # 완성 메시지를 꺼낸다.
-            with client.messages.stream(
-                model=AI_REPORT_MODEL,
-                max_tokens=AI_REPORT_MAX_TOKENS,
-                thinking={'type': 'adaptive'},
-                messages=[{'role': 'user', 'content': content}],
-            ) as stream:
-                message = stream.get_final_message()
+            message = _stream_ai_message(client, content)
 
             # 안전 분류기가 요청을 거부하면 HTTP 200 에 빈/부분 content 가 온다.
             # content[0] 을 바로 읽으면 IndexError 로 떨어져 원인을 알 수 없다.
@@ -1190,6 +1251,16 @@ class AIReportView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         except Exception as e:
+            # 재시도를 다 쓰고도 실패한 일시적 장애는 사용자가 "다시 눌러보면 된다"는
+            # 걸 알 수 있게 원인을 구분해서 알려준다.
+            if _is_transient(e):
+                logger.warning('AI 리포트 일시 장애로 최종 실패 — %s', e)
+                return Response(
+                    {'error': 'AI 서버가 일시적으로 혼잡합니다. '
+                              '잠시 후 다시 시도해 주세요.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            logger.exception('AI 리포트 생성 실패 (exp=%s)', pk)
             return Response(
                 {'error': f'AI 리포트 생성 실패: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
