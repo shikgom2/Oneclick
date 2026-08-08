@@ -403,7 +403,14 @@ _TRANSIENT_ERROR_TYPES = frozenset({
 CONNECTIVITY_BANDS = ('delta', 'theta', 'alpha', 'sigma', 'beta', 'gamma')
 
 # 연결성 지표: (필드 접두어, 프롬프트에 쓸 이름)
-CONNECTIVITY_METRICS = (('connectivity', 'wPLI'), ('connectivity2', 'PLV'))
+# 대역별 격자에 넣을 행 구성. PDF 는 대역마다 지형도와 연결성을 함께 보여주므로,
+# 모델에게도 같은 것을 보여줘야 캡션이 실제로 본 그림을 설명하게 된다.
+# 지형도를 빼면 모델이 못 본 그림을 설명하게 된다.
+BAND_FIGURE_ROWS = (
+    ('topography',    '지형도(파워 분포)'),
+    ('connectivity',  'wPLI(연결성)'),
+    ('connectivity2', 'PLV(연결성)'),
+)
 
 # 연결성 변화를 추적할 단계. EEG 모델의 ForeignKey 이름과 같아야 한다.
 CONNECTIVITY_PHASES = (
@@ -587,7 +594,7 @@ def _collect_connectivity_blocks(exp):
     for band in CONNECTIVITY_BANDS:
         band_items = []          # 이 대역에서 실제로 붙은 (지표, 단계)
         grid_rows, row_labels = [], []
-        for prefix, metric in CONNECTIVITY_METRICS:
+        for prefix, metric in BAND_FIGURE_ROWS:
             row, present = [], False
             for attr, ko, obj in phases:
                 raw, _ = _img_raw(getattr(obj, f'{prefix}_{band}', None), stats=img_stats)
@@ -630,7 +637,7 @@ def _collect_connectivity_blocks(exp):
         else:
             # 합성 실패 — 낱장으로 보낸다. 상한을 넘으면 아래에서 경고가 뜬다.
             blocks.append({'type': 'text',
-                           'text': f'===== {band.upper()} 대역 연결성 figure ====='})
+                           'text': f'===== {band.upper()} 대역 뇌파 figure ====='})
             for metric, row in row_labels:
                 for (attr, ko, _), raw in zip(phases, row):
                     if not raw:
@@ -651,9 +658,9 @@ def _collect_connectivity_blocks(exp):
                      '합성이 실패했을 가능성이 큽니다(위 로그 확인). 요청이 거절될 수 있습니다.',
                      n_images, AI_REPORT_MAX_IMAGES)
 
-    total = len(CONNECTIVITY_METRICS) * len(CONNECTIVITY_BANDS) * len(phases)
+    total = len(BAND_FIGURE_ROWS) * len(CONNECTIVITY_BANDS) * len(phases)
     if labels:
-        logger.info('[AI리포트] 연결성 figure %d/%d개 첨부 (대역 %d개, 단계 %d개: %s)',
+        logger.info('[AI리포트] 뇌파 figure %d/%d개 첨부 (대역 %d개, 단계 %d개: %s)',
                     attached, total, len(labels), len(phases),
                     ', '.join(ko for _, ko, _ in phases))
         # 원본 타일과 실제 전송분을 나눠서 남긴다. 둘을 섞으면 합성이 제대로
@@ -1105,67 +1112,188 @@ def _collect_report_data(exp) -> dict:
             band: _img_url(getattr(b, f'connectivity2_{band}', None)) for band in bands
         }
 
+    # 설문 (주관적 증상) — 7장 임상 배경의 근거다.
+    survey = _questionnaire_summary(getattr(exp, 'questionnaire', None))
+
+    # 기억 정리 결합 (SO-Spindle) — 6장 휴식의 질 지표
+    coupling = None
+    if eeg and getattr(eeg, 'spindle_coupling', None):
+        coupling = eeg.spindle_coupling
+
     return {
         'patient': patient, 'hrv_phases': hrv_phases, 'sleep': sleep, 'eeg': eeg_data,
         'hrv_images': hrv_images, 'eeg_images': eeg_images,
+        'survey': survey, 'coupling': coupling,
+        'figures': _collect_figure_urls(exp),
     }
+
+
+# 설문 척도별 (표시명, 무엇을 재나, 기준 안내). 리포트 7-1 표를 그대로 채운다.
+QUESTIONNAIRE_SCALES = (
+    ('irls',      'IRLS',       '다리 불편감',    '0~10 경도, 11~20 중등도, 21~30 중증, 31+ 매우 중증'),
+    ('psql',      'PSQI-K',     '수면의 질',      '5점 초과면 수면의 질이 나쁜 편'),
+    ('isi',       'ISI',        '불면 심각도',    '0~7 없음, 8~14 경도, 15~21 중등도, 22+ 중증'),
+    ('ess',       'ESS',        '주간 졸림',      '0~10 정상, 11~15 경도, 16+ 과다'),
+    ('compass31', 'COMPASS31',  '자율신경 증상',  '점수가 높을수록 자율신경 증상이 많음'),
+    ('bai',       'BAI',        '불안 정도',      '0~7 정상, 8~15 경도, 16~25 중등도, 26+ 중증'),
+    ('bdi2',      'BDI-II',     '우울 정도',      '0~13 정상, 14~19 경도, 20~28 중등도, 29+ 중증'),
+)
+
+
+def _questionnaire_summary(q):
+    """설문 객체 → [{key, label, score, measures, reference}] 목록.
+
+    기준 문구를 함께 넘긴다. 모델에게 "몇 점이면 어떤 수준인지"를 알려줘야
+    '경도 불면 경향' 같은 해석을 지어내지 않고 근거대로 쓴다.
+    """
+    if q is None:
+        return None
+    rows = []
+    for attr, label, measures, reference in QUESTIONNAIRE_SCALES:
+        val = getattr(q, attr, None)
+        if val is None:
+            continue
+        rows.append({'key': attr, 'label': label, 'score': val,
+                     'measures': measures, 'reference': reference})
+    return rows or None
+
+
+def _collect_figure_urls(exp):
+    """PDF 가 고정 레이아웃으로 배치할 그림들의 URL 을 모은다.
+
+    어떤 그림을 어디에 넣을지는 코드가 정한다(고정 레이아웃). 모델은 캡션과
+    해석만 쓴다. 매번 같은 구성이 나와야 검수가 가능하고, 그림 선택을 모델에
+    맡기면 실패 지점이 늘어난다.
+    """
+    figs = {'faa': {}, 'spectrogram': {}, 'topography': {}, 'connectivity': {},
+            'connectivity2': {}, 'diff': {}}
+    eeg = getattr(exp, 'eeg', None)
+    if eeg is None:
+        return figs
+
+    faa = getattr(eeg, 'faa', None)
+    if faa is not None:
+        for attr, _ko in CONNECTIVITY_PHASES:
+            figs['faa'][attr] = _img_url(getattr(faa, f'faa_{attr}', None))
+
+    spec = getattr(eeg, 'psd_spectrogram', None)
+    if spec is not None:
+        for ch in ('fp1', 'fp2'):
+            figs['spectrogram'][ch] = _img_url(getattr(spec, ch, None))
+
+    # 단계 x 대역 지형도/연결성 — 5장에서 대역별로 한 줄씩 배치한다.
+    for attr, _ko in CONNECTIVITY_PHASES:
+        obj = getattr(eeg, attr, None)
+        if obj is None:
+            continue
+        for kind in ('topography', 'connectivity', 'connectivity2'):
+            figs[kind].setdefault(attr, {})
+            for band in CONNECTIVITY_BANDS:
+                figs[kind][attr][band] = _img_url(getattr(obj, f'{kind}_{band}', None))
+
+    # 구간 간 차이 (자극 전후 변화)
+    for i, attr in enumerate(('diff1', 'diff2', 'diff3', 'diff4'), start=1):
+        obj = getattr(eeg, attr, None)
+        if obj is None:
+            continue
+        figs['diff'][attr] = {
+            band: _img_url(getattr(obj, f'topography_{band}', None))
+            for band in CONNECTIVITY_BANDS
+        }
+    return figs
 
 
 def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
     """Claude에게 구조화된 JSON 리포트 반환을 요청하는 프롬프트.
 
-    conn_labels 는 이 요청에 실제로 첨부된 연결성 figure 목록
-    ([{'metric': 'wPLI', 'band': 'delta'}, ...]). 첨부된 것만 해석을 요구해야
-    모델이 없는 그림을 지어내지 않는다.
-    """
-    import json as _json
+    리포트는 "환자 본인이 읽고 자기 뇌를 이해하는" 문서다. 따라서 결론(강점·약점·
+    성향)을 앞에 놓고 상세 데이터는 뒤로 보낸다. 그림 배치는 코드가 고정 레이아웃으로
+    처리하므로 모델은 본문과 캡션만 쓴다.
 
+    conn_labels 는 이 요청에 실제로 첨부된 figure 목록이다. 첨부된 것만 해석을
+    요구해야 모델이 없는 그림을 지어내지 않는다.
+    """
     patient = data['patient']
     hrv_phases = data['hrv_phases']
     sleep = data['sleep']
     eeg = data['eeg']
+    survey = data.get('survey')
+    coupling = data.get('coupling')
 
-    # HRV 요약 텍스트
+    # ── HRV 단계별 (변화 기호를 미리 계산해 넣는다) ──────────────────
     hrv_lines = []
     prev_rmssd = None
     for p in hrv_phases:
         rmssd = p.get('rmssd')
         sym = _rmssd_change_symbol(prev_rmssd, rmssd)
         hrv_lines.append(
-            f"  {p['name']} ({p['name_ko']}): "
-            f"SDNN={_fmt(p.get('sdnn'),'ms')}, RMSSD={_fmt(rmssd,'ms')} {sym}, "
-            f"pNN50={_fmt(p.get('pnn50'),'%')}, LF/HF={_fmt(p.get('lh_ratio'))}, "
-            f"VLF={_fmt(p.get('vlf'),'%')}, LF={_fmt(p.get('lf'),'%')}, HF={_fmt(p.get('hf'),'%')}"
+            f"  {p['name_ko']}({p['name']}): "
+            f"이완지표(RMSSD)={_fmt(rmssd, 'ms')} {sym}, "
+            f"변동성(SDNN)={_fmt(p.get('sdnn'), 'ms')}, "
+            f"긴장균형(LF/HF)={_fmt(p.get('lh_ratio'))}, "
+            f"pNN50={_fmt(p.get('pnn50'), '%')}, "
+            f"VLF={_fmt(p.get('vlf'), '%')}, LF={_fmt(p.get('lf'), '%')}, "
+            f"HF={_fmt(p.get('hf'), '%')}"
         )
         prev_rmssd = rmssd
 
+    # ── 휴식 구조 ────────────────────────────────────────────────
     sleep_lines = []
     if sleep:
-        sleep_lines = [
-            f"  TIB={_fmt(sleep.get('tib'),'min')}, TST={_fmt(sleep.get('tst'),'min')}, "
-            f"WASO={_fmt(sleep.get('waso'),'min')}, 수면효율={_fmt(sleep.get('sleep_eff'),'%')}",
-            f"  수면잠복기={_fmt(sleep.get('sleep_latency'),'min')}, REM잠복기={_fmt(sleep.get('rem_latency'),'min')}",
-            f"  N1={_fmt(sleep.get('n1_pct'),'%')}({_fmt(sleep.get('n1_min'),'min')}), "
-            f"N2={_fmt(sleep.get('n2_pct'),'%')}({_fmt(sleep.get('n2_min'),'min')}), "
-            f"N3={_fmt(sleep.get('n3_pct'),'%')}({_fmt(sleep.get('n3_min'),'min')}), "
-            f"REM={_fmt(sleep.get('rem_pct'),'%')}({_fmt(sleep.get('rem_min'),'min')})",
-        ]
+        sleep_lines.append(
+            f"  총 측정시간={_fmt(sleep.get('tib'), 'min')}, "
+            f"실제 휴식시간={_fmt(sleep.get('tst'), 'min')}, "
+            f"중간 각성={_fmt(sleep.get('waso'), 'min')}, "
+            f"휴식효율={_fmt(sleep.get('sleep_eff'), '%')} (정상 85% 이상)"
+        )
+        sleep_lines.append(
+            f"  진입까지={_fmt(sleep.get('sleep_latency'), 'min')}, "
+            f"꿈단계까지={_fmt(sleep.get('rem_latency'), 'min')}"
+        )
+        sleep_lines.append(
+            f"  단계별: 얕은진입(N1)={_fmt(sleep.get('n1_min'), 'min')}"
+            f"({_fmt(sleep.get('n1_pct'), '%')}), "
+            f"안정휴식(N2)={_fmt(sleep.get('n2_min'), 'min')}"
+            f"({_fmt(sleep.get('n2_pct'), '%')}), "
+            f"깊은휴식(N3)={_fmt(sleep.get('n3_min'), 'min')}"
+            f"({_fmt(sleep.get('n3_pct'), '%')}), "
+            f"꿈단계(REM)={_fmt(sleep.get('rem_min'), 'min')}"
+            f"({_fmt(sleep.get('rem_pct'), '%')})"
+        )
 
+    # ── EEG ──────────────────────────────────────────────────────
     eeg_lines = []
     if eeg.get('staging_dist'):
         sd = eeg['staging_dist']
         eeg_lines.append(
-            f"  수면 단계 분포(epoch): W={sd.get('W')}%, N1={sd.get('N1')}%, "
-            f"N2={sd.get('N2')}%, N3={sd.get('N3')}%, REM={sd.get('REM')}%"
+            f"  구간별 상태 분포: 각성={sd.get('W')}%, 얕은진입={sd.get('N1')}%, "
+            f"안정휴식={sd.get('N2')}%, 깊은휴식={sd.get('N3')}%, 꿈단계={sd.get('REM')}%"
         )
     if eeg.get('psd_bands'):
         pb = eeg['psd_bands']
         eeg_lines.append(
-            f"  EEG PSD: " +
+            "  뇌파 밴드 비중: " +
             ', '.join(f"{k.capitalize()}={v}%" for k, v in pb.items())
         )
 
-    # 첨부된 연결성 figure → 대역 단위로 "단계별 변화"를 해석하게 한다.
+    # ── 설문 ─────────────────────────────────────────────────────
+    survey_lines = []
+    for row in (survey or []):
+        survey_lines.append(
+            f"  {row['label']}={row['score']} ({row['measures']}) — 기준: {row['reference']}"
+        )
+
+    # ── 기억 정리 결합 ────────────────────────────────────────────
+    coupling_line = ''
+    if coupling:
+        coupling_line = (
+            "\n[기억 정리 결합 (깊은 리듬과 기억정리 리듬이 맞물리는 정도)]\n"
+            f"  {_json_compact(coupling)}\n"
+            "  ※ coupled_ratio = 결합이 일어난 비율(양), MRL = 결합 타이밍의 "
+            "일관성(질, 0~1). n_*_per_min = 분당 발생 수.\n"
+        )
+
+    # ── 첨부 figure 목록 ──────────────────────────────────────────
     conn_labels = conn_labels or []
     if conn_labels:
         conn_listing = '\n'.join(
@@ -1177,128 +1305,192 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
             f"  · {c['band']}: {BAND_REFERENCE.get(c['band'], '')}"
             for c in conn_labels
         )
-        conn_data_block = f"""
-[첨부된 연결성 figure — 이 메시지에 이미지로 함께 전달됨]
+        band_keys = [c['band'] for c in conn_labels]
+        conn_block = f"""
+[첨부된 뇌파 figure — 이미지로 함께 전달됨]
   대역마다 그림 "한 장"이 오고, 그 한 장이 격자입니다.
-  행 = 지표(wPLI/PLV), 열 = 단계(기저선→자극→회복 순).
-  각 그림 바로 앞의 텍스트에 그 격자의 행·열 구성이 적혀 있으니 그대로 따르세요.
-  같은 행에서 왼쪽→오른쪽으로 읽으면 그것이 단계별 변화입니다.
+  행 = 지표(지형도 / wPLI / PLV), 열 = 구간(기준→자극→회복 순).
+  각 그림 바로 앞의 텍스트에 격자 구성이 적혀 있으니 그대로 따르세요.
+  같은 행에서 왼쪽→오른쪽으로 읽으면 그것이 구간별 변화입니다.
+  흰 칸은 데이터가 없다는 뜻이니 없는 것으로 취급하세요.
+  · 지형도 = 머리를 위에서 본 파워 분포 지도. 위=이마, 아래=뒤통수.
+    빨강일수록 그 부위에서 이 리듬이 강하다는 뜻입니다.
+  · wPLI, PLV = 두 부위가 함께 움직이는 정도(협응). 선이 많고 진할수록 강합니다.
+    둘은 계산 방식만 다르므로 따로 설명하지 말고 하나로 묶어 서술하세요.
 {conn_listing}
-  ※ wPLI = weighted Phase Lag Index (위상지연 기반, 용적전도 영향에 강건)
-  ※ PLV  = Phase Locking Value (위상동기화 강도)
 
-[대역별 생리적 의미 — 일반인 설명에 이 내용을 근거로 사용하세요]
+[대역별 생리적 의미 — 쉬운 설명의 근거로 사용하세요]
 {band_ref}
 """
-        conn_items = ',\n'.join(
-            f"""    {{
-      "band": "{c['band']}",
-      "band_role": "이 대역이 무엇을 반영하는지, 왜 이 피험자에게 중요한지 일반인이 이해할 수 있게 설명 (100~140자)",
-      "phase_change": "첨부 figure에서 기저선→자극→회복으로 갈수록 연결 패턴이 실제로 어떻게 변하는지. 단계를 하나씩 짚어가며 서술하고, 강해진/약해진 영역(전두-후두, 좌-우 등)과 전체 연결 밀도의 추이를 구체적으로 (280~380자)",
-      "clinical_meaning": "그 변화가 이 피험자에게 갖는 의미. 다른 지표(수면 구조, HRV)와 연결지어 해석하고, 정상 범위와 비교 (200~280자)",
-      "key_takeaway": "핵심 1문장 (60자 이내)"
-    }}"""
-            for c in conn_labels
-        )
-        conn_json_block = f""",
-  "connectivity": [
-{conn_items}
-  ]"""
-        conn_rule = """
-[연결성 figure 해석 규칙]
-- 대역 하나당 항목 하나입니다. 위에 나열된 대역과 같은 순서·같은 개수로 작성하세요.
-- phase_change 가 핵심입니다. 기저선 한 장만 설명하지 말고 단계 간 '변화'를 서술하세요.
-  단계가 기저선뿐이면 변화 대신 기저 상태를 서술하고 그 사실을 명시하세요.
-- wPLI 와 PLV 를 각각 따로 설명하지 마세요. 하나의 통합된 서술로 쓰되, 두 지표가
-  서로 다른 경향을 보일 때만 그 차이를 짧게 언급하세요.
-- band_role 은 위 [대역별 생리적 의미]에 근거해 쓰고, 전문용어는 풀어서 쓰세요.
-- 첨부된 이미지를 실제로 보고 서술하세요. 그림에서 확인되지 않는 내용을 지어내지 마세요.
-  판독이 어려우면 "판독 불가"로 명시하고 이유를 적으세요.
-- 각 그림은 격자입니다. 같은 행(같은 지표)에서 열을 왼쪽부터 차례로 비교해야
-  단계별 변화가 보입니다. 격자 안에 흰 칸이 있으면 그 조합은 데이터가 없다는 뜻이니
-  없는 것으로 취급하세요.
-"""
     else:
-        conn_data_block = ''
-        conn_json_block = ''
-        conn_rule = ''
+        conn_listing = ''
+        band_ref = ''
+        band_keys = list(CONNECTIVITY_BANDS)
+        conn_block = '\n[뇌 연결성 figure 없음 — bands 항목은 수치 데이터만으로 작성하세요]\n'
 
-    prompt = f"""당신은 수면·자율신경계 분야의 전문 임상 신경생리학 AI입니다.
-아래 피험자 데이터를 분석하여 NeuroTx Clinical Report 형식의 한국어 임상 보고서를 작성하고,
-반드시 아래 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
-※ 각 필드의 글자 수 제한을 반드시 준수하세요. 전체 응답이 JSON으로 완결되어야 합니다.
-※ 서술 깊이: 두루뭉술한 일반론 대신 이 피험자의 실제 수치를 인용해 근거를 대세요.
-   "양호합니다" 같은 평가만 쓰지 말고 어떤 값이 어느 기준에 비해 어떻다는 식으로 쓰세요.
-   데이터가 없는 항목은 없다고 명시하고, 그 때문에 무엇을 판단할 수 없는지도 적으세요.
-※ 읽는 사람: 임상의뿐 아니라 피험자 본인도 함께 읽습니다. 수치와 임상 용어는 그대로
-   쓰되, 전문용어가 처음 나올 때만 괄호로 짧게 풀어 주세요.
-   예) "RMSSD(부교감신경 활성 지표)", "WASO(잠든 뒤 깬 시간)".
-   풀이는 한 문장에 하나까지만 — 문장이 늘어지면 오히려 읽기 어려워집니다.
-   같은 용어를 두 번째 쓸 때는 풀이를 반복하지 마세요.
-   글자 수 제한은 그대로입니다. 풀이를 넣느라 근거 수치를 빼지 마세요.
-{conn_rule}
+    bands_json = ',\n'.join(
+        f"""    {{
+      "band": "{b}",
+      "nickname": "이 리듬을 한마디로 부르는 쉬운 별명 (예: 깊은 휴식 엔진). 6~14자",
+      "verdict": "강점 / 약점 영역 / 중립 / 강점이자 함정 처럼 이 대역의 성격을 한마디로. 12자 이내",
+      "bullets": ["데이터가 실제로 말하는 것. 수치를 인용하되 쉬운 말로. 60~110자", "두 번째 관찰. 2~3개"],
+      "strength": "이 대역에서 이 사람이 잘하는 것 (50~110자)",
+      "weakness": "이 대역에서 약한 것 (50~110자)",
+      "meaning": "그래서 일상에서 무엇으로 나타나는지. 없으면 빈 문자열 (0~110자)",
+      "summary_state": "요약표용 - 이 뇌의 상태 (18자 이내)",
+      "summary_verdict": "요약표용 - 강점/약점 한 줄 (30자 이내)"
+    }}"""
+        for b in band_keys
+    )
 
-=== 피험자 데이터 ===
+    prompt = f"""당신은 신경생리 데이터를 다루는 임상 리포터입니다.
+아래 데이터를 바탕으로, **검사받은 본인이 읽고 자기 뇌를 이해하도록** 만든 한국어
+리포트를 작성하고, 반드시 아래 JSON 형식으로만 응답하세요.
+JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 
-[환자 정보]
+=== 이 리포트의 목적 ===
+본인이 궁금한 건 "내 뇌가 어떤가"입니다. "건강하다/아니다"가 아니라
+**무엇을 잘하고(강점) 무엇이 약한지(약점), 어떤 성향의 뇌인지, 무엇을 눈여겨볼지**를
+알려주는 것이 목적입니다.
+
+=== 반드시 지킬 규칙 ===
+1. 쉬운 말로. 전문용어(RMSSD, LF/HF, sigma, coupling, wPLI 등)를 그대로 쓰지 마세요.
+   - "부교감" → "이완 담당 신경",  "N3/서파수면" → "깊은 휴식"
+   - "RMSSD" → "이완 지표",        "LF/HF" → "긴장 균형"
+   - "sleep spindle" → "기억 정리 리듬",  "각성(arousal)" → "깸"
+   부득이 쓸 때는 괄호로 한 번만 풀어 주고, 두 번째부터는 반복하지 마세요.
+2. 수치는 인용하되 해석을 붙이세요. "62.3%"만 쓰지 말고 "정상 85% 이상인데 62.3%"처럼.
+3. 시간 표현 금지. "그날 밤", "야간", "잠들었을 때" 같은 표현을 쓰지 마세요.
+   이 검사가 낮에 진행됐을 수 있습니다. "이번 검사", "측정 중", "휴식", "쉼" 을 쓰세요.
+   "수면" 대신 "휴식"을 기본으로 쓰되, 검사명(수면다원검사)은 그대로 둡니다.
+4. 자극의 종류(tVNS 등 기법명)를 언급하지 마세요. 그냥 "자극"입니다.
+   리포트의 주인공은 "이 뇌가 어떤가"이지 "무슨 실험을 했나"가 아닙니다.
+5. 기관명은 "고려대학교"만. 회사명·연구자 이름·학과를 절대 쓰지 마세요.
+6. 진단 단정 금지. "~일 가능성", "눈여겨볼 방향" 수준으로만 쓰고 근거를 함께 대세요.
+   안심할 수 있는 부분(데이터상 시사되지 않는 것)도 균형 있게 제시하세요.
+7. 톤: 차분한 임상 문서. "제가 분석했습니다" 같은 1인칭, 이모지, 채팅체 금지.
+   담백하고 전문적으로. 단정적 감탄이나 과장된 표현을 쓰지 마세요.
+8. 데이터가 없는 항목은 없다고 명시하고, 그 때문에 무엇을 판단할 수 없는지 적으세요.
+   없는 수치를 지어내지 마세요.
+9. 여러 데이터가 서로 어긋나면 숨기지 말고 "교차 검증으로 이렇게 다시 읽힌다"고
+   명확히 정리하세요. 그것이 이 리포트의 신뢰도를 만듭니다.
+
+=== 검사받은 분의 데이터 ===
+
+[기본 정보]
   이름: {patient['name']} | 나이: {patient['age']}세 | 성별: {patient['sex']}
-  생년월일: {patient['birth']} | 측정일: {patient['measurement_date']}
+  측정일: {patient['measurement_date']}
 
-[HRV 단계별 데이터 (▲상승/▼하강/─불변)]
+[심박변이도 — 구간별 (▲상승/▼하강/─불변)]
 {chr(10).join(hrv_lines) if hrv_lines else '  데이터 없음'}
 
-[수면 구조 데이터]
+[휴식 구조 (수면다원검사 요약)]
 {chr(10).join(sleep_lines) if sleep_lines else '  데이터 없음'}
 
-[EEG 데이터]
+[뇌파]
 {chr(10).join(eeg_lines) if eeg_lines else '  데이터 없음'}
-{conn_data_block}
+{coupling_line}
+[설문 (본인이 느끼는 증상)]
+{chr(10).join(survey_lines) if survey_lines else '  데이터 없음'}
+{conn_block}
 === 요청 JSON 구조 ===
 
 {{
-  "executive_summary": "3개 축(자율신경 반응성·수면 구조·기질적 프로파일) 종합 요약. 각 축의 대표 수치를 근거로 인용할 것 (4~5문장, 350자 이내)",
-  "so_what": "임상적 시사점 — 신경생리학적 의미와 치료 전망 (3~4문장, 300자 이내)",
-  "sections": [
+  "headline": {{
+    "one_liner": "이 뇌를 요약하는 한 문장. 강점과 약점이 한 문장에 다 담기게. 큰 글씨 박스에 들어갑니다 (30~55자)",
+    "detail": "그 한 문장을 풀어 설명. 무엇이 좋고 무엇이 아쉬운지 (2~3문장, 180자 이내)"
+  }},
+  "bands": [
+{bands_json}
+  ],
+  "domains": [
     {{
-      "number": "01",
-      "title_ko": "자율신경계 기저선 분석",
-      "title_en": "Autonomic Baseline Assessment",
-      "content": "Baseline HRV 수치 해석, 교감/부교감 균형, SDNN·RMSSD·LF/HF 분석 (200~250자)",
-      "key_takeaway": "핵심 결론 1문장 (80자 이내)"
+      "name": "뇌 구조·기반",
+      "verdict": "강점 / 약점 / 안정 / 예민 중 하나 (6자 이내)",
+      "bullets": ["이 영역에서 관찰된 것. 수치 근거 포함 (60~120자)", "2~3개"],
+      "note": "이 영역을 한 줄로 짚는 말. 없으면 빈 문자열 (0~120자)"
     }},
-    {{
-      "number": "02",
-      "title_ko": "단계별 자율신경 반응 매핑",
-      "title_en": "Phase-by-Phase ANS Response Mapping",
-      "content": "RMSSD 변화 추이(▲▼─), 반응 패턴 분류, Vagal Responsiveness 등급 (200~250자)",
-      "key_takeaway": "핵심 결론 1문장 (80자 이내)"
+    {{ "name": "각성·인지", "verdict": "...", "bullets": ["..."], "note": "..." }},
+    {{ "name": "휴식·회복", "verdict": "...", "bullets": ["..."], "note": "..." }},
+    {{ "name": "정서 조절", "verdict": "...", "bullets": ["..."], "note": "..." }},
+    {{ "name": "자율신경", "verdict": "...", "bullets": ["..."], "note": "..." }}
+  ],
+  "profile": {{
+    "type_label": "이 뇌의 성향을 한마디로. 따옴표 없이 (예: 고성능이지만 잘 꺼지지 않는 뇌). 30자 이내",
+    "rationale": "왜 그렇게 보는지. 여러 지표가 어떻게 한 방향을 가리키는지 (2~3문장, 200자 이내)",
+    "traits": ["이런 뇌에서 흔한 일상 특징. 본인이 '맞다' 하고 느낄 만한 것 (25~50자)", "3~5개"],
+    "watch": [
+      {{
+        "title": "눈여겨볼 방향 제목 (20자 이내)",
+        "level": "가능성 있음 / 참고할 만함 중 하나",
+        "evidence": "왜 그렇게 보는지 근거. 어떤 수치와 어떤 설문이 겹치는지 (80~160자)"
+      }}
+    ],
+    "reassuring": [
+      {{ "title": "안심할 수 있는 부분 (20자 이내)", "note": "왜 시사되지 않는지 근거 (40~90자)" }}
+    ],
+    "approach": ["이 뇌에 맞을 법한 방향 (참고 수준). 진단·처방이 아님 (50~120자)", "2~3개"],
+    "one_sentence": "3장을 닫는 한 문장 결론 (60~110자)"
+  }},
+  "evidence": {{
+    "intro": "뒷부분이 왜 있는지, 검사가 어떻게 진행됐는지 안내. 구간 구성을 설명하되 기법명은 쓰지 말 것 (2~3문장, 200자 이내)",
+    "hrv": {{
+      "what_is": "심박변이도가 무엇인지 한두 문장으로 아주 쉽게 (100자 이내)",
+      "flow": "전체 흐름 그래프에서 보이는 것. 어느 구간에서 오르고 내리는지 (2~3문장, 200자 이내)",
+      "phase_notes": [
+        {{ "phase_ko": "기준", "note": "그 구간을 한 줄로 (20자 이내)" }}
+      ],
+      "comparison": "자극 전후 종합 비교에서 읽히는 것 (2문장, 160자 이내)",
+      "key_point": "4장의 요점 한 문단 (120자 이내)"
     }},
-    {{
-      "number": "03",
-      "title_ko": "수면 구조 분석",
-      "title_en": "Sleep Architecture Assessment",
-      "content": "수면 단계 분포 정상 범위 대비 해석, 수면효율·잠복기·WASO 의미, EEG PSD 해석 (200~250자)",
-      "key_takeaway": "핵심 결론 1문장 (80자 이내)"
+    "eeg": {{
+      "how_to_read": "지형도와 연결성 그림을 어떻게 보는지 안내. 위=이마, 빨강=강함, 선=협응 식으로 (2~3문장, 200자 이내)",
+      "band_captions": [
+        {{ "band": "delta", "caption": "이 대역 그림의 캡션. 그림에서 실제로 보이는 것만 (40~90자)" }}
+      ],
+      "faa": "정서 균형 지표가 무엇이고 이 사람은 어떤 방향인지. 값이 없으면 없다고 쓸 것 (2~3문장, 200자 이내)"
     }},
-    {{
-      "number": "04",
-      "title_ko": "다축 통합 분석",
-      "title_en": "Multi-modal Integration Analysis",
-      "content": "HRV × 수면 × EEG 다축 동기화 평가, Golden Window 판단, 치료 효과 예측 (200~250자)",
-      "key_takeaway": "핵심 결론 1문장 (80자 이내)"
+    "sleep": {{
+      "spectrogram": "시간에 따른 뇌파 변화 그림에서 보이는 것 (100자 이내)",
+      "symmetry": "좌우 반구 비교 결과와 그 의미 (120자 이내)",
+      "coupling": "기억 정리 결합 지표가 무엇을 보는 것이고 결과가 어떤지. 질(타이밍)과 양(횟수)을 나눠서 (150자 이내)",
+      "stage_ratio": "구간별 상태 비율에서 읽히는 것 (150자 이내)",
+      "resolution": "앞 장에서 애매했던 부분이 이 데이터로 어떻게 다시 읽히는지. 교차 검증 결과. 그런 게 없으면 빈 문자열 (0~200자)"
     }},
-    {{
-      "number": "05",
-      "title_ko": "치료 권고사항 및 예후",
-      "title_en": "Therapeutic Recommendations & Prognosis",
-      "content": "최적 자극 타이밍, 프로토콜 권고, 보조 요법, 단기·중기 예후 (200~250자)",
-      "key_takeaway": "핵심 결론 1문장 (80자 이내)"
+    "clinical": {{
+      "survey": "설문 점수들이 함께 가리키는 것. 앞의 뇌·심장 데이터와 맞는지 (2~3문장, 200자 이내)",
+      "psg": "휴식 구조 요약에서 가장 중요한 숫자와 그 의미 (2~3문장, 200자 이내)"
     }}
-  ]{conn_json_block},
-  "concluding_remarks": "종합 결론과 치료 방향. 근거가 된 핵심 수치를 짚고, 다음 단계 권고까지 (5~6문장, 500자 이내)"
+  }},
+  "summary": {{
+    "domain_table": [
+      {{ "domain": "뇌 구조·기반", "verdict": "강점", "key": "핵심을 한 줄로 (40자 이내)" }}
+    ],
+    "strengths": ["내 뇌가 잘하는 것 (30~60자)", "3~5개"],
+    "weaknesses": ["챙기면 좋은 것 (30~60자)", "2~4개"],
+    "conclusions": ["번호가 매겨질 핵심 결론. 근거 수치를 짚을 것 (60~130자)", "3~4개"],
+    "disclaimer": "한 차례 검사라 진단이 아닌 경향이며 담당 전문의와 상의해야 한다는 안내 (2문장, 160자 이내)"
+  }}
 }}
+
+[작성 순서 지침]
+- bands 는 위에 나열된 대역과 같은 순서·같은 개수로 작성하세요.
+- domains 는 위 5개를 그 순서 그대로 작성하세요.
+- evidence.hrv.phase_notes 는 실제 존재하는 구간 수만큼 작성하세요.
+- evidence.eeg.band_captions 는 첨부된 대역 수만큼 작성하세요.
+- summary.domain_table 은 domains 와 같은 순서·같은 개수로 작성하세요.
+- 앞부분(headline/bands/domains/profile)이 이 리포트의 얼굴입니다. 여기에 힘을 쓰세요.
 """
     return prompt
+
+
+def _json_compact(obj) -> str:
+    """중첩 dict/list 를 프롬프트에 넣기 좋게 한 줄로 줄인다."""
+    import json as _json
+    try:
+        return _json.dumps(obj, ensure_ascii=False, separators=(', ', '='))
+    except (TypeError, ValueError):
+        return str(obj)
 
 
 def _api_error_type(exc):
