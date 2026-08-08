@@ -21,6 +21,7 @@ from report.models import *
 from django.db.models import Q
 from uuid import uuid4
 from django.core.files.base import ContentFile
+from django.core.cache import cache
 
 
 class ExperimentsPagination(PageNumberPagination):
@@ -1590,13 +1591,51 @@ def _stream_ai_message(client, content, started=None):
             time.sleep(wait)
 
 
+# 캐시 키에 넣는 스키마 버전. 프롬프트나 JSON 구조를 바꾸면 이 값을 올린다.
+# 안 그러면 옛 구조로 만들어진 결과가 캐시에서 계속 나와, 프롬프트를 고쳐도
+# 리포트가 안 바뀌는 것처럼 보인다.
+AI_REPORT_SCHEMA_VERSION = 'v2'
+
+
+def _ai_cache_key(pk) -> str:
+    return f'ai_report:{AI_REPORT_SCHEMA_VERSION}:{pk}'
+
+
 class AIReportView(APIView):
-    """AI 임상 리포트 생성 — DB 저장 없이 구조화 JSON 반환 (PDF는 클라이언트에서 생성)."""
+    """AI 임상 리포트 생성 — 구조화 JSON 반환 (PDF는 클라이언트에서 생성).
+
+    생성에 3분 넘게 걸리는데 그동안 연결에는 한 바이트도 흐르지 않는다. 중간의
+    공유기·방화벽이 그런 유휴 세션을 정리해버려서, 다 만들어놓고 전달만 실패하는
+    일이 반복됐다(로그상 SIGPIPE / generated 0 bytes). 타임아웃을 올려도 해결되지
+    않는다 — 연결이 죽는 것이지 기다림이 짧은 게 아니기 때문이다.
+
+    그래서 결과를 캐시에 저장한다. 전달이 실패해도 생성 자체는 끝났으므로,
+    클라이언트가 GET 으로 다시 받아가면 된다. GET 은 짧은 요청이라 끊길 일이 없다.
+    """
+
+    def get(self, request, pk):
+        """이미 생성된 리포트를 꺼낸다. 없으면 404.
+
+        POST 가 도중에 끊겼을 때 클라이언트가 이걸로 결과를 받아간다.
+        아직 생성 중이면 404 가 나오므로 클라이언트는 잠시 후 다시 물어보면 된다.
+        """
+        cached = cache.get(_ai_cache_key(pk))
+        if not cached:
+            return Response({'status': 'pending'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(cached, status=status.HTTP_200_OK)
 
     def post(self, request, pk):
         # harakiri 시계는 요청이 워커에 들어온 순간부터 돈다. figure 60장을 base64 로
         # 인코딩하는 준비 단계도 여기 포함되므로 시간 예산의 기준점을 맨 앞에 둔다.
         started = time.monotonic()
+
+        # 이미 만들어 둔 게 있으면 그대로 준다. 전달만 실패했던 경우 다시 3분을
+        # 기다리거나 API 비용을 또 쓸 이유가 없다. 새로 뽑으려면 ?force=1.
+        if request.query_params.get('force') not in ('1', 'true', 'True'):
+            cached = cache.get(_ai_cache_key(pk))
+            if cached:
+                logger.info('[AI리포트] 캐시 반환 exp=%s', pk)
+                return Response(cached, status=status.HTTP_200_OK)
 
         try:
             exp = Experiments.objects.select_related(
@@ -1728,4 +1767,15 @@ class AIReportView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        return Response({**report_data, 'ai': ai_json}, status=status.HTTP_200_OK)
+        payload = {**report_data, 'ai': ai_json}
+        # 전달이 실패해도 결과가 남도록 먼저 저장한다. 아래 Response 를 쓰는
+        # 도중에 연결이 끊기면(SIGPIPE) 이 함수는 예외로 끝나므로, 저장이
+        # 반환보다 앞서야 한다.
+        try:
+            cache.set(_ai_cache_key(pk), payload)
+            logger.info('[AI리포트] 결과 캐시에 저장 exp=%s', pk)
+        except Exception as e:
+            # 캐시에 못 넣어도 리포트 자체는 돌려줘야 한다.
+            logger.warning('[AI리포트] 캐시 저장 실패 exp=%s — %s: %s',
+                           pk, type(e).__name__, e)
+        return Response(payload, status=status.HTTP_200_OK)

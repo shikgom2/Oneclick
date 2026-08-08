@@ -199,6 +199,21 @@ MEDIA_ROOT1 = os.path.join(BASE_DIR, 'build', 'icons')
 # 만든 로거는 설정이 없어 루트(WARNING)로 떨어지고, logger.info 가 전부 조용히
 # 버려진다. AI 리포트의 계측 로그(토큰 수, 이미지 크기, 소요 시간)가 안 보이던
 # 이유다. 해당 앱 로거만 INFO 로 올린다 — 다른 앱 로그는 그대로 둔다.
+# AI 리포트 생성 결과를 담아둘 캐시.
+#
+# 파일 기반을 쓰는 이유: uwsgi 가 processes=5 라 워커가 5개다. Django 기본값인
+# LocMemCache 는 프로세스마다 따로 존재해서, A 워커가 저장한 것을 B 워커가 못 읽는다.
+# 리포트 생성(3분 이상)과 그 결과를 받아가는 요청은 서로 다른 워커에 배정되므로
+# 반드시 프로세스 간에 공유되는 저장소여야 한다.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': os.path.join(BASE_DIR, 'cache', 'ai_report'),
+        'TIMEOUT': 60 * 60 * 6,      # 6시간
+        'OPTIONS': {'MAX_ENTRIES': 500},
+    }
+}
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,      # Django 자체 로거를 죽이지 않는다
