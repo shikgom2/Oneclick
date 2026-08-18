@@ -1671,3 +1671,49 @@ class AIReportView(APIView):
             logger.exception('[AI리포트] DB 저장 실패 exp=%s — %s: %s',
                              pk, type(e).__name__, e)
         return Response({**report_data, 'ai': ai_json}, status=status.HTTP_200_OK)
+
+
+class AIReportGenerateView(AIReportView):
+    """측정 장비가 업로드 직후 리포트 생성을 요청하는 전용 창구.
+
+    인증 없이 열어두되 리포트 내용은 돌려주지 않는다.
+
+    측정 장비는 토큰을 갖고 있지 않다(업로드 엔드포인트도 AllowAny 다).
+    그렇다고 AIReportView 를 통째로 열면 환자 이름·나이·임상 서술이 인증 없이
+    노출된다. 그래서 여기서는 "만들어졌다 / 만드는 중이다" 상태만 알려주고,
+    본문을 받아가려면 로그인해서 AIReportView 를 쓰게 한다.
+
+    이미 저장된 실험을 다시 호출하면 생성하지 않고 즉시 exists 를 돌려주므로,
+    반복 호출로 API 비용이 새지 않는다.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        # 상태 조회도 리포트 유무를 알려줄 뿐 본문은 주지 않는다.
+        exists = Experiments.objects.filter(pk=pk).exclude(
+            ai_report__isnull=True).exclude(ai_report='').exists()
+        if exists:
+            return Response({'status': 'exists', 'pk': pk}, status=status.HTTP_200_OK)
+        in_flight = bool(_cache_get(_ai_cache_key(pk) + ':lock'))
+        return Response({'status': 'generating' if in_flight else 'not_started',
+                         'pk': pk}, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request, pk):
+        resp = super().post(request, pk)
+        # 성공 응답에서 환자 데이터를 걷어내고 상태만 남긴다.
+        # 오류 응답({'error': ...})에는 환자 데이터가 없으므로 그대로 보낸다.
+        if resp.status_code == status.HTTP_200_OK:
+            return Response({'status': 'ok', 'pk': pk}, status=status.HTTP_200_OK)
+        if resp.status_code == status.HTTP_202_ACCEPTED:
+            return Response({'status': 'generating', 'pk': pk},
+                            status=status.HTTP_202_ACCEPTED,
+                            headers={'Retry-After': '10'})
+        # 오류 응답에서도 안내 문구만 남긴다. 파싱 실패 응답에는 'raw' 로
+        # 리포트 본문 일부가 들어 있어, 그대로 내보내면 인증 없이 환자 서술이
+        # 새어 나간다.
+        detail = ''
+        if isinstance(getattr(resp, 'data', None), dict):
+            detail = str(resp.data.get('error', ''))
+        return Response({'status': 'failed', 'pk': pk, 'error': detail},
+                        status=resp.status_code)
+

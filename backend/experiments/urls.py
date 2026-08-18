@@ -24,4 +24,9 @@ urlpatterns = [
         views.AIReportView.as_view(),
         name='ai report'
     ),
+    path(
+        '<int:pk>/ai-report/generate/',
+        views.AIReportGenerateView.as_view(),
+        name='ai report generate'
+    ),
 ]
