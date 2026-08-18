@@ -400,12 +400,23 @@ AI_REPORT_HARAKIRI_SEC = int(os.environ.get('AI_REPORT_HARAKIRI_SEC', '300'))
 AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get('AI_REPORT_MIN_GENERATION_SEC', '230'))
 
 # 스트림이 침묵할 때 끊는 시간. 마감 검사는 이벤트가 와야 돌기 때문에, 완전히
-# 멎은 스트림을 끊는 건 이 타임아웃뿐이다. 따라서
+# 멎은 스트림을 끊는 건 이 타임아웃뿐이다. 이상적으로는
 #   DEADLINE + read < harakiri
-# 를 만족해야 우리가 먼저 끊고 503 을 돌려줄 수 있다. 이걸 어기면 워커가
-# harakiri 로 먼저 죽어 캐시 저장조차 못 하고 결과가 통째로 사라진다.
-AI_REPORT_STREAM_READ_SEC = max(
-    10, min(60, AI_REPORT_HARAKIRI_SEC - AI_REPORT_DEADLINE_SEC - 10))
+# 를 만족해야 워커가 harakiri 로 죽기 전에 우리가 먼저 끊고 503 을 줄 수 있다.
+#
+# 다만 하한이 우선이다. 실측: 입력 2.5만 토큰 + 이미지 6장 + adaptive thinking
+# 이면 첫 이벤트까지 20초를 넘는다. read 를 그보다 짧게 잡으면 정상 생성 중인
+# 스트림을 매번 죽여 모든 요청이 실패한다(실제로 겪었다).
+# 두 실패를 견줘보면 명확하다.
+#   read 가 짧다  -> 전 요청이 100% 실패
+#   read 가 길다  -> 마감 직전에 스트림이 멎은 드문 경우만 워커가 죽는다
+# 그래서 하한을 지키고, harakiri 여유가 부족하면 조용히 타협하지 말고 크게 알린다.
+AI_REPORT_STREAM_READ_MIN_SEC = 60
+
+_read_headroom = AI_REPORT_HARAKIRI_SEC - AI_REPORT_DEADLINE_SEC - 10
+AI_REPORT_STREAM_READ_SEC = int(os.environ.get(
+    'AI_REPORT_STREAM_READ_SEC',
+    str(max(AI_REPORT_STREAM_READ_MIN_SEC, min(90, _read_headroom)))))
 
 if AI_REPORT_MIN_GENERATION_SEC >= AI_REPORT_DEADLINE_SEC:
     logger.error(
@@ -413,9 +424,11 @@ if AI_REPORT_MIN_GENERATION_SEC >= AI_REPORT_DEADLINE_SEC:
         AI_REPORT_MIN_GENERATION_SEC, AI_REPORT_DEADLINE_SEC)
 if AI_REPORT_DEADLINE_SEC + AI_REPORT_STREAM_READ_SEC >= AI_REPORT_HARAKIRI_SEC:
     logger.error(
-        '[AI리포트] 설정 오류: DEADLINE(%d) + read(%d) >= harakiri(%d). '
-        '워커가 먼저 죽어 결과를 잃을 수 있다.',
-        AI_REPORT_DEADLINE_SEC, AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
+        '[AI리포트] harakiri 여유 부족: 마감(%d) + read(%d) >= harakiri(%d). '
+        '마감 직전에 스트림이 멎으면 워커가 먼저 죽어 결과를 잃는다. '
+        'ini 의 harakiri 를 %d 이상으로 올리고 AI_REPORT_HARAKIRI_SEC 도 같이 맞출 것.',
+        AI_REPORT_DEADLINE_SEC, AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC,
+        AI_REPORT_DEADLINE_SEC + AI_REPORT_STREAM_READ_SEC + 20)
 logger.info('[AI리포트] 시간 예산 — 마감 %d초, 생성 예약 %d초, 스트림 read %d초, harakiri %d초',
             AI_REPORT_DEADLINE_SEC, AI_REPORT_MIN_GENERATION_SEC,
             AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
