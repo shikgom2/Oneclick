@@ -287,8 +287,9 @@ class ExperimentView(APIView):
                               trigger=trigger,
                               stimulus_info=stimulus_info)
             exp.save()
+            # pk 를 돌려줘야 클라이언트가 이어서 리포트 생성을 호출할 수 있다.
             return Response(
-                {'result': 'Success!!'},
+                {'result': 'Success!!', 'pk': exp.pk},
                 status=status.HTTP_200_OK
             )
         except Exception as e:
@@ -1395,6 +1396,46 @@ def _stream_ai_message(client, content, started=None):
 AI_REPORT_SCHEMA_VERSION = 'v3'
 
 
+def _report_queryset():
+    """리포트 조립에 필요한 관계를 한 번에 당겨오는 쿼리셋.
+
+    GET 과 POST 가 같은 걸 써야 한다. 한쪽만 select_related 를 빠뜨리면
+    그쪽만 조용히 느려진다.
+    """
+    return Experiments.objects.select_related(
+        'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
+        'hrv__stimulation2', 'hrv__recovery2',
+        'eeg__baseline', 'eeg__stimulation1', 'eeg__recovery1',
+        'eeg__stimulation2', 'eeg__recovery2',
+        'eeg__faa', 'eeg__psd_spectrogram',
+        'questionnaire', 'report',
+    )
+
+
+def _load_saved_report(exp):
+    """DB 에 저장해 둔 리포트 JSON 을 꺼낸다. 없거나 깨졌으면 None."""
+    raw = getattr(exp, 'ai_report', None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning('[AI리포트] 저장된 리포트 파싱 실패 exp=%s — %s', exp.pk, e)
+        return None
+
+
+def _save_report(exp, ai_json):
+    """리포트를 DB 에 영구 저장한다.
+
+    캐시가 아니라 DB 를 쓰는 이유: 리포트는 측정 결과의 일부라 다음에 열었을 때도
+    그대로 있어야 한다. 캐시는 만료되고, 파일 캐시에 환자 정보가 평문으로 남는
+    문제도 있었다. 여기에는 AI 서술만 넣고 수치·그림 URL 은 조회 시점에 DB 에서
+    다시 조립한다.
+    """
+    exp.ai_report = json.dumps(ai_json, ensure_ascii=False)
+    exp.save(update_fields=['ai_report'])
+
+
 def _cache_get(key):
     """캐시 읽기 실패가 요청 전체를 죽이지 않게 한다.
 
@@ -1426,28 +1467,45 @@ class AIReportView(APIView):
     """
 
     def get(self, request, pk):
-        """이미 생성된 리포트를 꺼낸다. 없으면 404.
+        """저장된 리포트를 즉시 돌려준다. 없으면 404.
 
-        POST 가 도중에 끊겼을 때 클라이언트가 이걸로 결과를 받아간다.
-        아직 생성 중이면 404 가 나오므로 클라이언트는 잠시 후 다시 물어보면 된다.
+        측정 업로드 시점에 클라이언트가 미리 만들어 두므로, 웹에서 열 때는
+        생성을 기다릴 일이 없다. 아직 없으면 404 이고, 그때는 POST 로 만들면 된다.
         """
-        cached = _cache_get(_ai_cache_key(pk))
-        if not cached:
-            return Response({'status': 'pending'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(cached, status=status.HTTP_200_OK)
+        try:
+            exp = _report_queryset().get(pk=pk)
+        except Experiments.DoesNotExist:
+            return Response({'status': 'not_found'}, status=status.HTTP_404_NOT_FOUND)
+
+        ai_json = _load_saved_report(exp)
+        if ai_json is None:
+            # 생성 중인지 아직 시작도 안 했는지 구분해 준다. 클라이언트가
+            # 계속 기다릴지 새로 요청할지 판단할 수 있어야 한다.
+            in_flight = bool(_cache_get(_ai_cache_key(pk) + ':lock'))
+            return Response({'status': 'generating' if in_flight else 'not_started'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # 수치와 그림 URL 은 저장하지 않고 조회 시점에 다시 조립한다.
+        return Response({**_collect_report_data(exp), 'ai': ai_json},
+                        status=status.HTTP_200_OK)
 
     def post(self, request, pk):
         # harakiri 시계는 요청이 워커에 들어온 순간부터 돈다. figure 60장을 base64 로
         # 인코딩하는 준비 단계도 여기 포함되므로 시간 예산의 기준점을 맨 앞에 둔다.
         started = time.monotonic()
 
-        # 이미 만들어 둔 게 있으면 그대로 준다. 전달만 실패했던 경우 다시 3분을
-        # 기다리거나 API 비용을 또 쓸 이유가 없다. 새로 뽑으려면 ?force=1.
+        # 이미 만들어 둔 게 있으면 그대로 준다. 3분과 API 비용을 또 쓸 이유가 없다.
+        # 새로 뽑으려면 ?force=1.
         if request.query_params.get('force') not in ('1', 'true', 'True'):
-            cached = _cache_get(_ai_cache_key(pk))
-            if cached:
-                logger.info('[AI리포트] 캐시 반환 exp=%s', pk)
-                return Response(cached, status=status.HTTP_200_OK)
+            try:
+                exp = _report_queryset().get(pk=pk)
+            except Experiments.DoesNotExist:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+            saved = _load_saved_report(exp)
+            if saved is not None:
+                logger.info('[AI리포트] 저장된 리포트 반환 exp=%s', pk)
+                return Response({**_collect_report_data(exp), 'ai': saved},
+                                status=status.HTTP_200_OK)
 
         # 같은 실험에 요청이 겹치면 워커가 각각 3분씩 묶이고 API 비용도 배로 든다.
         # cache.add 는 키가 없을 때만 넣으므로 하나만 통과한다. 뒤늦은 요청은
@@ -1477,13 +1535,7 @@ class AIReportView(APIView):
     def _generate(self, request, pk, started):
         """실제 생성. post() 가 락을 잡은 상태로만 호출한다."""
         try:
-            exp = Experiments.objects.select_related(
-                'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
-                'hrv__stimulation2', 'hrv__recovery2',
-                'eeg__baseline', 'eeg__stimulation1', 'eeg__recovery1',
-                'eeg__stimulation2', 'eeg__recovery2',
-                'report'
-            ).get(pk=pk)
+            exp = _report_queryset().get(pk=pk)
         except Experiments.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
@@ -1607,15 +1659,15 @@ class AIReportView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        payload = {**report_data, 'ai': ai_json}
         # 전달이 실패해도 결과가 남도록 먼저 저장한다. 아래 Response 를 쓰는
         # 도중에 연결이 끊기면(SIGPIPE) 이 함수는 예외로 끝나므로, 저장이
-        # 반환보다 앞서야 한다.
+        # 반환보다 반드시 앞서야 한다.
         try:
-            cache.set(_ai_cache_key(pk), payload)
-            logger.info('[AI리포트] 결과 캐시에 저장 exp=%s', pk)
+            _save_report(exp, ai_json)
+            logger.info('[AI리포트] DB 에 저장 exp=%s', pk)
         except Exception as e:
-            # 캐시에 못 넣어도 리포트 자체는 돌려줘야 한다.
-            logger.warning('[AI리포트] 캐시 저장 실패 exp=%s — %s: %s',
-                           pk, type(e).__name__, e)
-        return Response(payload, status=status.HTTP_200_OK)
+            # 저장에 실패해도 이번 응답은 돌려준다. 다만 다음에 열면 없으므로
+            # 원인을 반드시 남긴다.
+            logger.exception('[AI리포트] DB 저장 실패 exp=%s — %s: %s',
+                             pk, type(e).__name__, e)
+        return Response({**report_data, 'ai': ai_json}, status=status.HTTP_200_OK)
