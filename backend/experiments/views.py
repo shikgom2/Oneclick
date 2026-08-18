@@ -386,10 +386,39 @@ AI_REPORT_RETRY_WAITS = (3, 8, 15)
 # 클라이언트는 503 조차 못 받고 연결이 끊긴다(503 보다 나쁜 결과다). 그래서 재시도가
 # 성공하더라도 생성을 끝낼 시간이 안 남는다면 차라리 지금 포기하고 503 을 준다.
 # ini 의 harakiri 를 올렸다면 환경변수로 같이 올려야 효과가 있다.
-AI_REPORT_DEADLINE_SEC = int(os.environ.get('AI_REPORT_DEADLINE_SEC', '150'))
+# 실측: 생성에 약 206초가 걸린다. 기본값은 반드시 그보다 커야 한다.
+# 예전 기본값 150 은 환경변수 없이 뜨면 모든 요청이 예산 초과로 죽는 값이었다.
+AI_REPORT_DEADLINE_SEC = int(os.environ.get('AI_REPORT_DEADLINE_SEC', '270'))
+
+# uwsgi harakiri. 코드가 이 값을 알아야 read 타임아웃을 안전하게 정할 수 있다.
+# ini 의 harakiri 를 바꾸면 이 환경변수도 같이 바꿔야 한다.
+AI_REPORT_HARAKIRI_SEC = int(os.environ.get('AI_REPORT_HARAKIRI_SEC', '300'))
 
 # 리포트 생성 자체에 최소한 남겨둬야 하는 시간. 이만큼도 안 남으면 재시도 중단.
-AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get('AI_REPORT_MIN_GENERATION_SEC', '90'))
+# 실측 206초 + 여유. 이 값이 실제 생성 시간보다 작으면, 재시도해도 완주할 수 없는
+# 상황을 '완주 가능'으로 오판해 예산만 태우고 503 을 반환하게 된다.
+AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get('AI_REPORT_MIN_GENERATION_SEC', '230'))
+
+# 스트림이 침묵할 때 끊는 시간. 마감 검사는 이벤트가 와야 돌기 때문에, 완전히
+# 멎은 스트림을 끊는 건 이 타임아웃뿐이다. 따라서
+#   DEADLINE + read < harakiri
+# 를 만족해야 우리가 먼저 끊고 503 을 돌려줄 수 있다. 이걸 어기면 워커가
+# harakiri 로 먼저 죽어 캐시 저장조차 못 하고 결과가 통째로 사라진다.
+AI_REPORT_STREAM_READ_SEC = max(
+    10, min(60, AI_REPORT_HARAKIRI_SEC - AI_REPORT_DEADLINE_SEC - 10))
+
+if AI_REPORT_MIN_GENERATION_SEC >= AI_REPORT_DEADLINE_SEC:
+    logger.error(
+        '[AI리포트] 설정 오류: MIN_GENERATION(%d) >= DEADLINE(%d). 재시도가 항상 거부된다.',
+        AI_REPORT_MIN_GENERATION_SEC, AI_REPORT_DEADLINE_SEC)
+if AI_REPORT_DEADLINE_SEC + AI_REPORT_STREAM_READ_SEC >= AI_REPORT_HARAKIRI_SEC:
+    logger.error(
+        '[AI리포트] 설정 오류: DEADLINE(%d) + read(%d) >= harakiri(%d). '
+        '워커가 먼저 죽어 결과를 잃을 수 있다.',
+        AI_REPORT_DEADLINE_SEC, AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
+logger.info('[AI리포트] 시간 예산 — 마감 %d초, 생성 예약 %d초, 스트림 read %d초, harakiri %d초',
+            AI_REPORT_DEADLINE_SEC, AI_REPORT_MIN_GENERATION_SEC,
+            AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
 
 # 재시도해도 되는 에러 타입. 서버 용량/일시 장애라 다시 던지면 성공할 수 있다.
 # 반대로 invalid_request_error 같은 건 몇 번을 보내도 똑같이 실패한다.
@@ -407,19 +436,22 @@ CONNECTIVITY_BANDS = ('delta', 'theta', 'alpha', 'sigma', 'beta', 'gamma')
 # 대역별 격자에 넣을 행 구성. PDF 는 대역마다 지형도와 연결성을 함께 보여주므로,
 # 모델에게도 같은 것을 보여줘야 캡션이 실제로 본 그림을 설명하게 된다.
 # 지형도를 빼면 모델이 못 본 그림을 설명하게 된다.
+# PDF 가 대역마다 그리는 것과 정확히 같아야 한다. 여기에만 있는 행을 두면
+# 모델이 리포트에 실리지 않는 그림을 설명하게 된다.
 BAND_FIGURE_ROWS = (
-    ('topography',    '지형도(파워 분포)'),
-    ('connectivity',  'wPLI(연결성)'),
-    ('connectivity2', 'PLV(연결성)'),
+    ('topography',   '지형도(파워 분포)'),
+    ('connectivity', '연결성'),
 )
 
 # 연결성 변화를 추적할 단계. EEG 모델의 ForeignKey 이름과 같아야 한다.
+# 구간 표기는 리포트 전체에서 한 벌이어야 한다. PDF 의 _kPhaseLabel 과 반드시
+# 같은 문자열을 쓴다 — 다르면 같은 문서 안에 두 가지 이름이 나온다.
 CONNECTIVITY_PHASES = (
-    ('baseline',     '기저선'),
-    ('stimulation1', '자극1'),
-    ('recovery1',    '회복1'),
-    ('stimulation2', '자극2'),
-    ('recovery2',    '회복2'),
+    ('baseline',     '기준'),
+    ('stimulation1', '1차 자극'),
+    ('recovery1',    '1차 회복'),
+    ('stimulation2', '2차 자극'),
+    ('recovery2',    '2차 회복'),
 )
 
 # 대역별 생리적 의미. 일반인이 읽는 리포트라 AI 가 지어내지 않도록 근거를 고정한다.
@@ -478,11 +510,6 @@ def _img_size(raw: bytes):
                 return None
             i += 2 + seg
     return None
-
-
-def _vision_tokens(w: int, h: int) -> int:
-    """Claude vision 입력 토큰 근사치 = (가로 x 세로) / 750."""
-    return int(w * h / 750)
 
 
 def _img_raw(field, stats=None):
@@ -809,224 +836,6 @@ def _eeg_psd_band_summary(psd_json):
     return result if result else None
 
 
-def _build_ai_prompt(exp: 'Experiments') -> str:  # noqa: F821
-    """NeuroTx Clinical Report 스타일의 임상 분석 프롬프트 생성."""
-
-    sex_str = '남성(M)' if str(exp.sex) == '0' else ('여성(F)' if str(exp.sex) == '1' else 'N/A')
-    mdate = exp.measurement_date.strftime('%Y-%m-%d %H:%M') if exp.measurement_date else 'N/A'
-
-    # ── HRV 단계별 수치 수집 ──────────────────────────────────────
-    hrv = exp.hrv
-    phases = []
-    phase_defs = [
-        ('Baseline',     hrv.baseline     if hrv else None),
-        ('Stimulation1', hrv.stimulation1 if hrv else None),
-        ('Recovery1',    hrv.recovery1    if hrv else None),
-        ('Stimulation2', hrv.stimulation2 if hrv else None),
-        ('Recovery2',    hrv.recovery2    if hrv else None),
-    ]
-    for pname, pobj in phase_defs:
-        d = _hrv_phase_summary(pobj)
-        phases.append((pname, d))
-
-    # RMSSD 단계별 변화 텍스트 생성
-    rmssd_rows = []
-    prev_rmssd = None
-    for pname, d in phases:
-        if d:
-            rmssd_val = d['rmssd']
-            sym = _rmssd_change_symbol(prev_rmssd, rmssd_val)
-            rmssd_rows.append(f"  {pname:<14} RMSSD={_fmt(rmssd_val,'ms')}  {sym}")
-            prev_rmssd = rmssd_val
-        else:
-            rmssd_rows.append(f"  {pname:<14} 데이터 없음")
-
-    # 최대 RMSSD / Baseline RMSSD → vagal responsiveness 계산
-    rmssd_vals = [d['rmssd'] for _, d in phases if d and d['rmssd'] is not None]
-    vagal_grade = 'N/A'
-    if len(rmssd_vals) >= 2:
-        try:
-            baseline_r = float(rmssd_vals[0])
-            peak_r = max(float(v) for v in rmssd_vals)
-            if baseline_r > 0:
-                pct = (peak_r - baseline_r) / baseline_r * 100
-                vagal_grade = (
-                    'EXCELLENT (누적형 +{:.0f}%)'.format(pct) if pct >= 80 else
-                    'GOOD (+{:.0f}%)'.format(pct) if pct >= 40 else
-                    'MODERATE (+{:.0f}%)'.format(pct) if pct >= 15 else
-                    'LOW (+{:.0f}%)'.format(pct)
-                )
-        except (TypeError, ValueError):
-            pass
-
-    # HRV 단계별 상세 표
-    hrv_table_rows = []
-    for pname, d in phases:
-        if not d:
-            hrv_table_rows.append(f"  {pname}: 데이터 없음")
-            continue
-        hrv_table_rows.append(
-            f"  [{pname}]\n"
-            f"    시간영역: SDNN={_fmt(d['sdnn'],'ms')} | RMSSD={_fmt(d['rmssd'],'ms')} | "
-            f"SDSD={_fmt(d['sdsd'],'ms')} | NN50={_fmt(d['nn50'],'')} | pNN50={_fmt(d['pnn50'],'%')} | "
-            f"TRI={_fmt(d['tri_index'])}\n"
-            f"    주파수영역: VLF={_fmt(d['vlf'],'%')} | LF={_fmt(d['lf'],'%')} | "
-            f"HF={_fmt(d['hf'],'%')} | LF/HF={_fmt(d['lh_ratio'])} | "
-            f"Norm-LF={_fmt(d['norm_lf'],'%')} | Norm-HF={_fmt(d['norm_hf'],'%')}"
-        )
-
-    # ── 수면 데이터 ───────────────────────────────────────────────
-    rpt = exp.report
-    sleep_rows = []
-    sleep_stage_rows = []
-    sleep_eff_grade = 'N/A'
-    if rpt:
-        sleep_eff = rpt.sleep_eff
-        if sleep_eff is not None:
-            try:
-                se = float(sleep_eff)
-                sleep_eff_grade = 'EXCELLENT (≥90%)' if se >= 90 else \
-                    'GOOD (85–89%)' if se >= 85 else \
-                    'FAIR (75–84%)' if se >= 75 else 'LOW (<75%)'
-            except (TypeError, ValueError):
-                pass
-
-        sleep_rows = [
-            f"  TIB={_fmt(rpt.tib,'min')} | TST={_fmt(rpt.tst,'min')} | TWT={_fmt(rpt.twt,'min')}",
-            f"  WASO={_fmt(rpt.waso,'min')} | 수면잠복기={_fmt(rpt.sleep_latency,'min')} | "
-            f"REM잠복기={_fmt(rpt.rem_latency,'min')} | 수면효율={_fmt(rpt.sleep_eff,'%')}",
-        ]
-        sleep_stage_rows = [
-            f"  N1={_fmt(rpt.sleep_n1_tst,'%')} ({_fmt(rpt.sleep_n1_min,'min')}) | "
-            f"N2={_fmt(rpt.sleep_n2_tst,'%')} ({_fmt(rpt.sleep_n2_min,'min')}) | "
-            f"N3={_fmt(rpt.sleep_n3_tst,'%')} ({_fmt(rpt.sleep_n3_min,'min')}) | "
-            f"NREM합={_fmt(rpt.sleep_nrem_tst,'%')} | REM={_fmt(rpt.sleep_rem_tst,'%')} ({_fmt(rpt.sleep_rem_min,'min')})",
-        ]
-    else:
-        sleep_rows = ['  수면 데이터 없음']
-
-    # ── EEG 데이터 ────────────────────────────────────────────────
-    eeg = exp.eeg
-    eeg_psd_text = '  EEG 데이터 없음'
-    eeg_staging_text = '  수면 단계 데이터 없음'
-    if eeg:
-        psd_summary = _eeg_psd_band_summary(eeg.psd) if eeg.psd else None
-        if psd_summary:
-            eeg_psd_text = '  ' + ' | '.join(
-                f"{b.capitalize()}={psd_summary[b]}%" for b in ['delta','theta','alpha','sigma','beta','gamma'] if b in psd_summary
-            )
-        else:
-            eeg_psd_text = '  PSD JSON 데이터 파싱 불가 (토포맵 이미지 기반 데이터)'
-
-        stage_dist = _sleep_stage_distribution_from_staging(eeg.sleep_staging) if eeg.sleep_staging else None
-        if stage_dist:
-            eeg_staging_text = (
-                f"  W={stage_dist['W']}% | N1={stage_dist['N1']}% | "
-                f"N2={stage_dist['N2']}% | N3={stage_dist['N3']}% | REM={stage_dist['REM']}%"
-            )
-
-    # ── 프롬프트 조합 (기존 텍스트 방식, 내부 참조용) ──────────────
-    prompt = f"""당신은 수면·자율신경계·뇌 네트워크 분야의 전문 임상 신경생리학 AI입니다.
-아래 피험자 데이터를 바탕으로 NeuroTx Clinical Report 스타일의 **한국어** 정밀 임상 보고서를 작성하세요.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[피험자 정보]
-  이름: {exp.name} | 나이: {exp.age if exp.age else 'N/A'}세 | 성별: {sex_str}
-  생년월일: {exp.birth if exp.birth else 'N/A'} | 측정일시: {mdate}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[HRV 단계별 상세 수치]
-{chr(10).join(hrv_table_rows) if hrv_table_rows else '  HRV 데이터 없음'}
-
-[RMSSD 단계별 추이 (자율신경 반응 핵심 지표)]
-{chr(10).join(rmssd_rows)}
-  → Vagal Responsiveness 등급: {vagal_grade}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[수면 구조 데이터]
-{chr(10).join(sleep_rows)}
-  수면 효율 등급: {sleep_eff_grade}
-
-[수면 단계 분포]
-{chr(10).join(sleep_stage_rows) if sleep_stage_rows else '  없음'}
-
-[EEG 수면 단계 분포 (epoch 기반, sleep_staging JSON)]
-{eeg_staging_text}
-
-[EEG 주파수 대역 상대 파워 (PSD)]
-{eeg_psd_text}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-## 보고서 작성 지침
-
-아래 7개 섹션을 **반드시 순서대로** 모두 작성하세요.
-
----
-
-### EXECUTIVE SUMMARY — 임상 통합 요약
-3개 축(① 자율신경 반응성, ② 수면 구조, ③ 기질적 프로파일)의 1~2문장 요약 후,
-**SO WHAT — 임상적 시사점** 단락(3~4문장)으로 이 환자의 전체 임상 의미를 종합하세요.
-
----
-
-### Section 01 | 자율신경계 기저선 분석 (Autonomic Baseline Assessment)
-- Baseline 단계 HRV 수치 해석 (교감/부교감 균형 상태)
-- SDNN·RMSSD·LF/HF 비를 중심으로 자율신경 상태 등급 판정
-- 임상 Exhibit 표(단계 / 수치 / 해석) 포함
-- **Key takeaway** 포함
-
----
-
-### Section 02 | 단계별 자율신경 반응 매핑 (Phase-by-Phase ANS Response)
-- Baseline → Stim1 → Rec1 → Stim2 → Rec2 순서로 RMSSD 변화 분석
-- ▲/▼/─ 기호 사용, 반응 패턴 분류 (단회 반응형 / 누적형 / 지연형 / 비반응형)
-- 임상 Exhibit 표(단계 / RMSSD / 변화 / 자율신경 상태) 포함
-- **Key takeaway** 포함
-
----
-
-### Section 03 | 수면 구조 및 EEG 스펙트럼 분석 (Sleep Architecture & EEG Spectrum)
-- 수면 단계 분포(N1/N2/N3/REM) 정상 범위 대비 해석
-- 수면 효율·잠복기·WASO 임상 의미
-- EEG PSD 데이터(있는 경우) 주파수 대역별 해석
-- 임상 Exhibit 표(단계 / 비율 / 정상범위 / 해석) 포함
-- **Key takeaway** 포함
-
----
-
-### Section 04 | 다축 통합 분석 (Multi-modal Integration)
-- HRV × 수면 구조 × EEG 스펙트럼의 동기화 여부 평가
-- "Golden Window" 해당 여부 — Rec2 단계 다축 동기화 평가
-- 5축 통합 판정 Exhibit 표 포함 (Spectral / Sleep / Vagal / FC 추정 / 종합)
-- **Key takeaway** 포함
-
----
-
-### Section 05 | 치료 권고사항 및 예후 (Therapeutic Recommendations & Prognosis)
-- 최적 자극 타이밍 (Chronotherapy 권고)
-- 보조 요법 (수면 위생 / 호흡 동조 / 운동 등)
-- 단기·중기·장기 예후 종합 평가 Exhibit 표
-- **Key takeaway** 포함
-
----
-
-### CONCLUDING REMARKS — 임상 종합 결론
-5개 축에서 일관된 결론을 3~5문장으로 종합하고,
-마지막 문장은 해당 환자의 치료 방향을 압축한 **핵심 임상 메시지**로 마무리하세요.
-
----
-
-## 추가 작성 규칙
-- 모든 수치는 임상적 맥락 안에서 해석 (단순 나열 금지)
-- 데이터가 없는 항목은 "데이터 없음 — 추가 측정 권고"로 명시
-- 한국어 본문 + 핵심 임상 용어는 영어 병기
-- Exhibit 표는 마크다운 표 형식(| 컬럼 | ... |) 사용
-- 각 섹션은 명확한 헤더(###)로 구분
-"""
-    return prompt
-
-
 def _collect_report_data(exp) -> dict:
     """Experiment 객체에서 PDF 생성에 필요한 전체 데이터를 수집."""
     sex_str = '남성(M)' if str(exp.sex) == '0' else ('여성(F)' if str(exp.sex) == '1' else 'N/A')
@@ -1044,11 +853,11 @@ def _collect_report_data(exp) -> dict:
     # HRV 단계별
     hrv = exp.hrv
     phase_defs = [
-        ('Baseline',     '기저선',   hrv.baseline     if hrv else None),
-        ('Stimulation1', '자극1',    hrv.stimulation1 if hrv else None),
-        ('Recovery1',    '회복1',    hrv.recovery1    if hrv else None),
-        ('Stimulation2', '자극2',    hrv.stimulation2 if hrv else None),
-        ('Recovery2',    '회복2',    hrv.recovery2    if hrv else None),
+        ('Baseline',     '기준',      hrv.baseline     if hrv else None),
+        ('Stimulation1', '1차 자극',  hrv.stimulation1 if hrv else None),
+        ('Recovery1',    '1차 회복',  hrv.recovery1    if hrv else None),
+        ('Stimulation2', '2차 자극',  hrv.stimulation2 if hrv else None),
+        ('Recovery2',    '2차 회복',  hrv.recovery2    if hrv else None),
     ]
     hrv_phases = []
     for name_en, name_ko, obj in phase_defs:
@@ -1098,21 +907,6 @@ def _collect_report_data(exp) -> dict:
                     'comparison': _img_url(obj.comparison),
                 })
 
-    # EEG 이미지 (Baseline 기준 — topography / COH / PLV)
-    eeg_images = {}
-    if exp.eeg and exp.eeg.baseline:
-        b = exp.eeg.baseline
-        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-        eeg_images['topography'] = {
-            band: _img_url(getattr(b, f'topography_{band}', None)) for band in bands
-        }
-        eeg_images['connectivity_coh'] = {
-            band: _img_url(getattr(b, f'connectivity_{band}', None)) for band in bands
-        }
-        eeg_images['connectivity_plv'] = {
-            band: _img_url(getattr(b, f'connectivity2_{band}', None)) for band in bands
-        }
-
     # 설문 (주관적 증상) — 7장 임상 배경의 근거다.
     survey = _questionnaire_summary(getattr(exp, 'questionnaire', None))
 
@@ -1123,7 +917,7 @@ def _collect_report_data(exp) -> dict:
 
     return {
         'patient': patient, 'hrv_phases': hrv_phases, 'sleep': sleep, 'eeg': eeg_data,
-        'hrv_images': hrv_images, 'eeg_images': eeg_images,
+        'hrv_images': hrv_images,
         'survey': survey, 'coupling': coupling,
         'figures': _collect_figure_urls(exp),
     }
@@ -1166,8 +960,7 @@ def _collect_figure_urls(exp):
     해석만 쓴다. 매번 같은 구성이 나와야 검수가 가능하고, 그림 선택을 모델에
     맡기면 실패 지점이 늘어난다.
     """
-    figs = {'faa': {}, 'spectrogram': {}, 'topography': {}, 'connectivity': {},
-            'connectivity2': {}, 'diff': {}}
+    figs = {'faa': {}, 'spectrogram': {}, 'topography': {}, 'connectivity': {}}
     eeg = getattr(exp, 'eeg', None)
     if eeg is None:
         return figs
@@ -1187,20 +980,11 @@ def _collect_figure_urls(exp):
         obj = getattr(eeg, attr, None)
         if obj is None:
             continue
-        for kind in ('topography', 'connectivity', 'connectivity2'):
+        for kind in ('topography', 'connectivity'):
             figs[kind].setdefault(attr, {})
             for band in CONNECTIVITY_BANDS:
                 figs[kind][attr][band] = _img_url(getattr(obj, f'{kind}_{band}', None))
 
-    # 구간 간 차이 (자극 전후 변화)
-    for i, attr in enumerate(('diff1', 'diff2', 'diff3', 'diff4'), start=1):
-        obj = getattr(eeg, attr, None)
-        if obj is None:
-            continue
-        figs['diff'][attr] = {
-            band: _img_url(getattr(obj, f'topography_{band}', None))
-            for band in CONNECTIVITY_BANDS
-        }
     return figs
 
 
@@ -1228,7 +1012,7 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
         rmssd = p.get('rmssd')
         sym = _rmssd_change_symbol(prev_rmssd, rmssd)
         hrv_lines.append(
-            f"  {p['name_ko']}({p['name']}): "
+            f"  {p['name'].lower()} ({p['name_ko']}): "
             f"이완지표(RMSSD)={_fmt(rmssd, 'ms')} {sym}, "
             f"변동성(SDNN)={_fmt(p.get('sdnn'), 'ms')}, "
             f"긴장균형(LF/HF)={_fmt(p.get('lh_ratio'))}, "
@@ -1310,14 +1094,13 @@ def _build_ai_prompt_json(data: dict, conn_labels=None) -> str:
         conn_block = f"""
 [첨부된 뇌파 figure — 이미지로 함께 전달됨]
   대역마다 그림 "한 장"이 오고, 그 한 장이 격자입니다.
-  행 = 지표(지형도 / wPLI / PLV), 열 = 구간(기준→자극→회복 순).
+  행 = 지형도 / 연결성, 열 = 구간(기준→자극→회복 순).
   각 그림 바로 앞의 텍스트에 격자 구성이 적혀 있으니 그대로 따르세요.
   같은 행에서 왼쪽→오른쪽으로 읽으면 그것이 구간별 변화입니다.
   흰 칸은 데이터가 없다는 뜻이니 없는 것으로 취급하세요.
   · 지형도 = 머리를 위에서 본 파워 분포 지도. 위=이마, 아래=뒤통수.
     빨강일수록 그 부위에서 이 리듬이 강하다는 뜻입니다.
-  · wPLI, PLV = 두 부위가 함께 움직이는 정도(협응). 선이 많고 진할수록 강합니다.
-    둘은 계산 방식만 다르므로 따로 설명하지 말고 하나로 묶어 서술하세요.
+  · 연결성 = 두 부위가 함께 움직이는 정도(협응). 선이 많고 진할수록 강합니다.
 {conn_listing}
 
 [대역별 생리적 의미 — 쉬운 설명의 근거로 사용하세요]
@@ -1439,7 +1222,7 @@ JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
       "what_is": "심박변이도가 무엇인지 한두 문장으로 아주 쉽게 (100자 이내)",
       "flow": "전체 흐름 그래프에서 보이는 것. 어느 구간에서 오르고 내리는지 (2~3문장, 200자 이내)",
       "phase_notes": [
-        {{ "phase_ko": "기준", "note": "그 구간을 한 줄로 (20자 이내)" }}
+        {{ "phase": "baseline", "note": "그 구간을 한 줄로 (20자 이내)" }}
       ],
       "comparison": "자극 전후 종합 비교에서 읽히는 것 (2문장, 160자 이내)",
       "key_point": "4장의 요점 한 문단 (120자 이내)"
@@ -1477,7 +1260,9 @@ JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 [작성 순서 지침]
 - bands 는 위에 나열된 대역과 같은 순서·같은 개수로 작성하세요.
 - domains 는 위 5개를 그 순서 그대로 작성하세요.
-- evidence.hrv.phase_notes 는 실제 존재하는 구간 수만큼 작성하세요.
+- evidence.hrv.phase_notes 의 "phase" 는 위 [심박변이도 — 구간별] 에 나온 영문 키를
+  (baseline, stimulation1, recovery1, stimulation2, recovery2) 소문자 그대로 쓰세요.
+  한글 이름을 넣으면 표에 연결되지 않습니다. 실제 존재하는 구간 수만큼 작성하세요.
 - evidence.eeg.band_captions 는 첨부된 대역 수만큼 작성하세요.
 - summary.domain_table 은 domains 와 같은 순서·같은 개수로 작성하세요.
 - 앞부분(headline/bands/domains/profile)이 이 리포트의 얼굴입니다. 여기에 힘을 쓰세요.
@@ -1594,7 +1379,21 @@ def _stream_ai_message(client, content, started=None):
 # 캐시 키에 넣는 스키마 버전. 프롬프트나 JSON 구조를 바꾸면 이 값을 올린다.
 # 안 그러면 옛 구조로 만들어진 결과가 캐시에서 계속 나와, 프롬프트를 고쳐도
 # 리포트가 안 바뀌는 것처럼 보인다.
-AI_REPORT_SCHEMA_VERSION = 'v2'
+AI_REPORT_SCHEMA_VERSION = 'v3'
+
+
+def _cache_get(key):
+    """캐시 읽기 실패가 요청 전체를 죽이지 않게 한다.
+
+    파일 기반 캐시는 디렉터리 생성·권한 문제로 예외를 던질 수 있다. 그게
+    AI 리포트 엔드포인트 전체를 500 으로 만들 이유는 없다 — 캐시는 가속 계층이지
+    필수 경로가 아니다.
+    """
+    try:
+        return cache.get(key)
+    except Exception as e:
+        logger.warning('[AI리포트] 캐시 읽기 실패 (%s: %s)', type(e).__name__, e)
+        return None
 
 
 def _ai_cache_key(pk) -> str:
@@ -1619,7 +1418,7 @@ class AIReportView(APIView):
         POST 가 도중에 끊겼을 때 클라이언트가 이걸로 결과를 받아간다.
         아직 생성 중이면 404 가 나오므로 클라이언트는 잠시 후 다시 물어보면 된다.
         """
-        cached = cache.get(_ai_cache_key(pk))
+        cached = _cache_get(_ai_cache_key(pk))
         if not cached:
             return Response({'status': 'pending'}, status=status.HTTP_404_NOT_FOUND)
         return Response(cached, status=status.HTTP_200_OK)
@@ -1632,11 +1431,38 @@ class AIReportView(APIView):
         # 이미 만들어 둔 게 있으면 그대로 준다. 전달만 실패했던 경우 다시 3분을
         # 기다리거나 API 비용을 또 쓸 이유가 없다. 새로 뽑으려면 ?force=1.
         if request.query_params.get('force') not in ('1', 'true', 'True'):
-            cached = cache.get(_ai_cache_key(pk))
+            cached = _cache_get(_ai_cache_key(pk))
             if cached:
                 logger.info('[AI리포트] 캐시 반환 exp=%s', pk)
                 return Response(cached, status=status.HTTP_200_OK)
 
+        # 같은 실험에 요청이 겹치면 워커가 각각 3분씩 묶이고 API 비용도 배로 든다.
+        # cache.add 는 키가 없을 때만 넣으므로 하나만 통과한다. 뒤늦은 요청은
+        # 즉시 202 를 받고 GET 폴링으로 결과를 받아가면 된다.
+        lock_key = _ai_cache_key(pk) + ':lock'
+        try:
+            acquired = cache.add(lock_key, 1, timeout=AI_REPORT_DEADLINE_SEC + 60)
+        except Exception as e:
+            # 캐시가 죽어 있어도 리포트 생성 자체는 막지 않는다.
+            logger.warning('[AI리포트] 락 획득 실패, 그대로 진행 (%s: %s)',
+                           type(e).__name__, e)
+            acquired = True
+        if not acquired:
+            logger.info('[AI리포트] 이미 생성 중 exp=%s — 202 반환', pk)
+            return Response({'status': 'generating'},
+                            status=status.HTTP_202_ACCEPTED,
+                            headers={'Retry-After': '10'})
+
+        try:
+            return self._generate(request, pk, started)
+        finally:
+            try:
+                cache.delete(lock_key)
+            except Exception:
+                pass
+
+    def _generate(self, request, pk, started):
+        """실제 생성. post() 가 락을 잡은 상태로만 호출한다."""
         try:
             exp = Experiments.objects.select_related(
                 'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
@@ -1673,7 +1499,8 @@ class AIReportView(APIView):
             client = anthropic.Anthropic(
                 api_key=api_key,
                 max_retries=0,
-                timeout=httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0),
+                timeout=httpx.Timeout(connect=5.0, write=30.0, pool=5.0,
+                                      read=float(AI_REPORT_STREAM_READ_SEC)),
             )
             # max_tokens 가 16000 을 넘으면 SDK 가 비스트리밍 요청을 거부한다
             # (긴 응답이 HTTP 타임아웃에 걸리기 때문). 스트리밍으로 받고 마지막에
