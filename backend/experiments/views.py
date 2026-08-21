@@ -18,10 +18,53 @@ from .models import Experiments
 from ecg.models import *
 from eeg.models import *
 from report.models import *
+from survey.models import Questionnaire
 from django.db.models import Q
 from uuid import uuid4
 from django.core.files.base import ContentFile
 from django.core.cache import cache
+
+
+# 설문 척도 → Questionnaire 필드. 클라이언트가 보내는 키와 모델 필드를 잇는다.
+QUESTIONNAIRE_FIELDS = (
+    ('irls', 'IRLS'), ('psql', 'PSQI'), ('isi', 'ISI'), ('ess', 'ESS'),
+    ('compass31', 'COMPASS31'), ('bai', 'BAI'), ('bdi2', 'BDI2'),
+)
+
+
+def _parse_questionnaire(raw):
+    """업로드된 설문 값으로 Questionnaire 를 만든다. 값이 없으면 None.
+
+    빈 값을 0 으로 저장하면 안 된다. 리포트에서 '전부 0점'이 실제로 측정된
+    점수처럼 보이고, 모델이 그걸 근거로 해석을 지어낸다. 값이 하나도 없으면
+    설문 자체를 붙이지 않아 리포트가 '데이터 없음'으로 처리하게 한다.
+    """
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        if raw.strip() in ('', '""'):
+            return None
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+
+    values = {}
+    for attr, key in QUESTIONNAIRE_FIELDS:
+        v = raw.get(key, raw.get(attr))
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        try:
+            values[attr] = float(v) if attr == 'compass31' else int(v)
+        except (TypeError, ValueError):
+            logger.warning('[설문] %s 값을 숫자로 읽을 수 없어 건너뜁니다: %r', key, v)
+
+    if not values:
+        return None
+    logger.info('[설문] %d개 척도 저장: %s', len(values), ', '.join(sorted(values)))
+    return Questionnaire.objects.create(**values)
 
 
 class ExperimentsPagination(PageNumberPagination):
@@ -279,11 +322,16 @@ class ExperimentView(APIView):
             trigger = self.get_value(data, 'trigger')
             stimulus_info = self.get_value(data, 'stimulus_info')
 
+            # 설문을 측정과 함께 올리면 리포트를 만들 때 데이터가 완성돼 있다.
+            # 나중에 웹에서 따로 넣으면 그 전에 만들어진 리포트에는 7장이 빈다.
+            questionnaire = _parse_questionnaire(data.get('questionnaire'))
+
             exp = Experiments(name=data['name'], age=age, birth=birth, sex=sex,
                               measurement_date=measurement_date,
                               hrv=hrv,
                               eeg=eeg,
                               report=report,
+                              questionnaire=questionnaire,
                               trigger=trigger,
                               stimulus_info=stimulus_info)
             exp.save()
