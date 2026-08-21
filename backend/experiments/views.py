@@ -435,49 +435,63 @@ AI_REPORT_RETRY_WAITS = (3, 8, 15)
 # 클라이언트는 503 조차 못 받고 연결이 끊긴다(503 보다 나쁜 결과다). 그래서 재시도가
 # 성공하더라도 생성을 끝낼 시간이 안 남는다면 차라리 지금 포기하고 503 을 준다.
 # ini 의 harakiri 를 올렸다면 환경변수로 같이 올려야 효과가 있다.
-# 실측: 생성에 약 206초가 걸린다. 기본값은 반드시 그보다 커야 한다.
-# 예전 기본값 150 은 환경변수 없이 뜨면 모든 요청이 예산 초과로 죽는 값이었다.
-AI_REPORT_DEADLINE_SEC = int(os.environ.get('AI_REPORT_DEADLINE_SEC', '270'))
-
-# uwsgi harakiri. 코드가 이 값을 알아야 read 타임아웃을 안전하게 정할 수 있다.
-# ini 의 harakiri 를 바꾸면 이 환경변수도 같이 바꿔야 한다.
+# ── 시간 예산 ────────────────────────────────────────────────────────
+# uwsgi harakiri 를 유일한 입력으로 두고 나머지를 파생시킨다.
+#
+# 예전에는 마감·생성예약·read 를 각각 따로 정했다. 그러다 harakiri 300 에
+# 마감 270 을 넣어 read 가 들어갈 자리가 없어졌고(그래서 read 20 초가 정상
+# 스트림을 죽였다), 마감을 올리자니 워커가 먼저 죽는 상황이 됐다.
+# 하나만 정하면 그런 조합이 애초에 나올 수 없다.
+#
+# ini 의 harakiri 를 바꾸면 이 환경변수도 반드시 같이 바꿔야 한다.
+# 값이 어긋나면 코드는 여유가 있다고 믿는데 실제로는 없다.
 AI_REPORT_HARAKIRI_SEC = int(os.environ.get('AI_REPORT_HARAKIRI_SEC', '300'))
 
-# 리포트 생성 자체에 최소한 남겨둬야 하는 시간. 이만큼도 안 남으면 재시도 중단.
-# 실측 206초 + 여유. 이 값이 실제 생성 시간보다 작으면, 재시도해도 완주할 수 없는
-# 상황을 '완주 가능'으로 오판해 예산만 태우고 503 을 반환하게 된다.
-AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get('AI_REPORT_MIN_GENERATION_SEC', '230'))
+# 스트림이 침묵할 때 끊는 시간.
+# 마감 검사는 이벤트가 와야 돌기 때문에, 완전히 멎은 스트림을 끊는 건 이것뿐이다.
+# 실측: 입력 2.5만 토큰 + 이미지 6장 + adaptive thinking 이면 첫 이벤트까지
+# 20초를 넘는다. 그보다 짧게 잡으면 정상 생성 중인 스트림을 매번 죽인다.
+AI_REPORT_STREAM_READ_SEC = int(os.environ.get('AI_REPORT_STREAM_READ_SEC', '60'))
 
-# 스트림이 침묵할 때 끊는 시간. 마감 검사는 이벤트가 와야 돌기 때문에, 완전히
-# 멎은 스트림을 끊는 건 이 타임아웃뿐이다. 이상적으로는
-#   DEADLINE + read < harakiri
-# 를 만족해야 워커가 harakiri 로 죽기 전에 우리가 먼저 끊고 503 을 줄 수 있다.
-#
-# 다만 하한이 우선이다. 실측: 입력 2.5만 토큰 + 이미지 6장 + adaptive thinking
-# 이면 첫 이벤트까지 20초를 넘는다. read 를 그보다 짧게 잡으면 정상 생성 중인
-# 스트림을 매번 죽여 모든 요청이 실패한다(실제로 겪었다).
-# 두 실패를 견줘보면 명확하다.
-#   read 가 짧다  -> 전 요청이 100% 실패
-#   read 가 길다  -> 마감 직전에 스트림이 멎은 드문 경우만 워커가 죽는다
-# 그래서 하한을 지키고, harakiri 여유가 부족하면 조용히 타협하지 말고 크게 알린다.
-AI_REPORT_STREAM_READ_MIN_SEC = 60
+# 워커가 harakiri 로 죽기 전에 우리가 먼저 끊고 503 을 돌려주기 위한 여유.
+# harakiri 로 죽으면 응답도, 캐시 저장도, 로그도 남지 않는다.
+AI_REPORT_SAFETY_MARGIN_SEC = 20
 
-_read_headroom = AI_REPORT_HARAKIRI_SEC - AI_REPORT_DEADLINE_SEC - 10
-AI_REPORT_STREAM_READ_SEC = int(os.environ.get(
-    'AI_REPORT_STREAM_READ_SEC',
-    str(max(AI_REPORT_STREAM_READ_MIN_SEC, min(90, _read_headroom)))))
+# 실측 생성 시간. 206초에서 270초 초과까지 관측됐다. 편차가 커서 넉넉히 잡는다.
+# 예산이 이보다 작으면 대부분의 요청이 마감 초과로 죽는다.
+AI_REPORT_OBSERVED_GENERATION_SEC = 330
 
+# 요청 하나에 허용하는 총 시간. 준비 + 재시도 + 생성이 전부 여기 들어간다.
+AI_REPORT_DEADLINE_SEC = int(os.environ.get(
+    'AI_REPORT_DEADLINE_SEC',
+    str(max(60, AI_REPORT_HARAKIRI_SEC
+            - AI_REPORT_STREAM_READ_SEC - AI_REPORT_SAFETY_MARGIN_SEC))))
+
+# 생성 자체에 남겨둬야 하는 시간. 이만큼도 안 남으면 재시도하지 않는다.
+# 이 값이 실제 생성 시간보다 작으면, 완주할 수 없는 재시도를 '가능'으로
+# 오판해 예산만 태우고 503 을 반환한다.
+AI_REPORT_MIN_GENERATION_SEC = int(os.environ.get(
+    'AI_REPORT_MIN_GENERATION_SEC',
+    str(max(30, AI_REPORT_DEADLINE_SEC - 60))))
+
+_needed = (AI_REPORT_OBSERVED_GENERATION_SEC
+           + AI_REPORT_STREAM_READ_SEC + AI_REPORT_SAFETY_MARGIN_SEC)
+if AI_REPORT_DEADLINE_SEC < AI_REPORT_OBSERVED_GENERATION_SEC:
+    logger.error(
+        '[AI리포트] 예산 부족: 마감 %d초인데 생성에 %d초가 걸린다. '
+        '대부분의 요청이 마감 초과로 실패한다. '
+        'ini 의 harakiri 를 %d 이상으로 올리고 AI_REPORT_HARAKIRI_SEC 도 같이 맞출 것 '
+        '(http-timeout 은 그보다 크게).',
+        AI_REPORT_DEADLINE_SEC, AI_REPORT_OBSERVED_GENERATION_SEC, _needed)
 if AI_REPORT_MIN_GENERATION_SEC >= AI_REPORT_DEADLINE_SEC:
     logger.error(
-        '[AI리포트] 설정 오류: MIN_GENERATION(%d) >= DEADLINE(%d). 재시도가 항상 거부된다.',
+        '[AI리포트] 설정 오류: 생성 예약(%d) >= 마감(%d). 재시도가 항상 거부된다.',
         AI_REPORT_MIN_GENERATION_SEC, AI_REPORT_DEADLINE_SEC)
 if AI_REPORT_DEADLINE_SEC + AI_REPORT_STREAM_READ_SEC >= AI_REPORT_HARAKIRI_SEC:
     logger.error(
         '[AI리포트] harakiri 여유 부족: 마감(%d) + read(%d) >= harakiri(%d). '
-        '마감 직전에 스트림이 멎으면 워커가 먼저 죽어 결과를 잃는다. '
-        'ini 의 harakiri 를 %d 이상으로 올리고 AI_REPORT_HARAKIRI_SEC 도 같이 맞출 것.',
-        AI_REPORT_DEADLINE_SEC, AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC,
-        AI_REPORT_DEADLINE_SEC + AI_REPORT_STREAM_READ_SEC + 20)
+        '마감 직전에 스트림이 멎으면 워커가 먼저 죽어 결과를 잃는다.',
+        AI_REPORT_DEADLINE_SEC, AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
 logger.info('[AI리포트] 시간 예산 — 마감 %d초, 생성 예약 %d초, 스트림 read %d초, harakiri %d초',
             AI_REPORT_DEADLINE_SEC, AI_REPORT_MIN_GENERATION_SEC,
             AI_REPORT_STREAM_READ_SEC, AI_REPORT_HARAKIRI_SEC)
