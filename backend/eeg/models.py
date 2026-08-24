@@ -42,6 +42,22 @@ class EEG(TimeStampedModel):
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_RECOVERY_2_ID'
     )
+    # ── 6-phase 모드 (baseline, stim1~4, recovery) 전용 (ecg.HRV 와 동일 원칙) ──
+    stimulation3 = models.ForeignKey(
+        'eeg.EEGStimulation3',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_STIMULATION_3_ID'
+    )
+    stimulation4 = models.ForeignKey(
+        'eeg.EEGStimulation4',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_STIMULATION_4_ID'
+    )
+    recovery = models.ForeignKey(
+        'eeg.EEGRecovery',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_RECOVERY_ID'
+    )
     diff1 = models.ForeignKey(
         'eeg.EEGDiff1',
         null=True, on_delete=models.CASCADE,
@@ -61,6 +77,12 @@ class EEG(TimeStampedModel):
         'eeg.EEGDiff4',
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_DIFF_4_ID'
+    )
+    # 6-phase 는 인접 쌍이 5개(recovery-stim4 포함)라 diff5 가 필요하다.
+    diff5 = models.ForeignKey(
+        'eeg.EEGDiff5',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_DIFF_5_ID'
     )
     faa = models.ForeignKey(
         'eeg.EEGFAA',
@@ -153,6 +175,20 @@ class EEGFAA(TimeStampedModel):
     faa_recovery2 = models.ImageField(
         null=False, blank=False,
         db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY2'
+    )
+    # 6-phase 전용. 기존 행에는 값이 없으므로 null 허용이어야 한다
+    # (기존 5개 컬럼의 null=False 는 이미 쌓인 데이터 때문에 그대로 둔다).
+    faa_stimulation3 = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_FRONTAL_ASYMMETRY_STIMULATION3'
+    )
+    faa_stimulation4 = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_FRONTAL_ASYMMETRY_STIMULATION4'
+    )
+    faa_recovery = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY'
     )
 
     class Meta:
@@ -268,6 +304,22 @@ class EEGRecovery2(EEGParameter):
         db_table = 'OC_EEG_RECOVERY_2'
 
 
+class EEGStimulation3(EEGParameter):
+    class Meta:
+        db_table = 'OC_EEG_STIMULATION_3'
+
+
+class EEGStimulation4(EEGParameter):
+    class Meta:
+        db_table = 'OC_EEG_STIMULATION_4'
+
+
+class EEGRecovery(EEGParameter):
+    """6-phase 모드의 마지막 회복 구간 ('회복')."""
+    class Meta:
+        db_table = 'OC_EEG_RECOVERY'
+
+
 class EEGDiffParameter(EEGParameter):
     # >> WAKE stage topography
     topography_delta_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_WAKE')
@@ -371,3 +423,8 @@ class EEGDiff3(EEGDiffParameter):
 class EEGDiff4(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_4'
+
+
+class EEGDiff5(EEGDiffParameter):
+    class Meta:
+        db_table = 'OC_EEG_DIFF_5'

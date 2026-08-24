@@ -56,6 +56,30 @@ class EEGDiff3Serializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class EEGStimulation3Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGStimulation3
+        fields = '__all__'
+
+
+class EEGStimulation4Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGStimulation4
+        fields = '__all__'
+
+
+class EEGRecoverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGRecovery
+        fields = '__all__'
+
+
+class EEGDiff5Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGDiff5
+        fields = '__all__'
+
+
 class EEGDiff4Serializer(serializers.ModelSerializer):
     class Meta:
         model = EEGDiff4
@@ -79,10 +103,14 @@ class EEGSerializer(serializers.ModelSerializer):
     recovery1 = EEGRecovery1Serializer(read_only=True)
     stimulation2 = EEGStimulation2Serializer(read_only=True)
     recovery2 = EEGRecovery2Serializer(read_only=True)
+    stimulation3 = EEGStimulation3Serializer(read_only=True)
+    stimulation4 = EEGStimulation4Serializer(read_only=True)
+    recovery = EEGRecoverySerializer(read_only=True)
     diff1 = EEGDiff1Serializer(read_only=True)
     diff2 = EEGDiff2Serializer(read_only=True)
     diff3 = EEGDiff3Serializer(read_only=True)
     diff4 = EEGDiff4Serializer(read_only=True)
+    diff5 = EEGDiff5Serializer(read_only=True)
     faa = EEGFaaSerializer(read_only=True)
     psd_spectrogram = EEGPSDSpectrogramSerializer(read_only=True)
     trigger = serializers.SerializerMethodField()
@@ -103,10 +131,14 @@ class EEGSerializer(serializers.ModelSerializer):
             'recovery1',
             'stimulation2',
             'recovery2',
+            'stimulation3',
+            'stimulation4',
+            'recovery',
             'diff1',
             'diff2',
             'diff3',
             'diff4',
+            'diff5',
             'faa',
             'psd_spectrogram',
             'spindle_coupling',

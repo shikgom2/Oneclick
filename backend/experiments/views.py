@@ -239,6 +239,10 @@ class ExperimentView(APIView):
                     recovery1=self.ecg_obj_save(HRVRecovery1, 'recovery1', hrv_data) if hrv_data.get('recovery1') else None,
                     stimulation2=self.ecg_obj_save(HRVStimulation2, 'stimulation2', hrv_data) if hrv_data.get('stimulation2') else None,
                     recovery2=self.ecg_obj_save(HRVRecovery2, 'recovery2', hrv_data) if hrv_data.get('recovery2') else None,
+                    # 6-phase 모드 (baseline, stim1~4, recovery)
+                    stimulation3=self.ecg_obj_save(HRVStimulation3, 'stimulation3', hrv_data) if hrv_data.get('stimulation3') else None,
+                    stimulation4=self.ecg_obj_save(HRVStimulation4, 'stimulation4', hrv_data) if hrv_data.get('stimulation4') else None,
+                    recovery=self.ecg_obj_save(HRVRecovery, 'recovery', hrv_data) if hrv_data.get('recovery') else None,
                 )
 
             if str(data['eeg']).strip() != '""':
@@ -260,10 +264,15 @@ class ExperimentView(APIView):
                     recovery1=self.eeg_obj_save(EEGRecovery1, 'recovery1', eeg_data) if eeg_data.get('recovery1', {}).get('topography_delta') else None,
                     stimulation2=self.eeg_obj_save(EEGStimulation2, 'stimulation2', eeg_data) if eeg_data.get('stimulation2', {}).get('topography_delta') else None,
                     recovery2=self.eeg_obj_save(EEGRecovery2, 'recovery2', eeg_data) if eeg_data.get('recovery2', {}).get('topography_delta') else None,
+                    # 6-phase 모드 (baseline, stim1~4, recovery)
+                    stimulation3=self.eeg_obj_save(EEGStimulation3, 'stimulation3', eeg_data) if eeg_data.get('stimulation3', {}).get('topography_delta') else None,
+                    stimulation4=self.eeg_obj_save(EEGStimulation4, 'stimulation4', eeg_data) if eeg_data.get('stimulation4', {}).get('topography_delta') else None,
+                    recovery=self.eeg_obj_save(EEGRecovery, 'recovery', eeg_data) if eeg_data.get('recovery', {}).get('topography_delta') else None,
                     diff1=self.eeg_diff_obj_save(EEGDiff1, 'diff1', eeg_data) if eeg_data.get('diff1') else None,
                     diff2=self.eeg_diff_obj_save(EEGDiff2, 'diff2', eeg_data) if eeg_data.get('diff2') else None,
                     diff3=self.eeg_diff_obj_save(EEGDiff3, 'diff3', eeg_data) if eeg_data.get('diff3') else None,
                     diff4=self.eeg_diff_obj_save(EEGDiff4, 'diff4', eeg_data) if eeg_data.get('diff4') else None,
+                    diff5=self.eeg_diff_obj_save(EEGDiff5, 'diff5', eeg_data) if eeg_data.get('diff5') else None,
                     psd_spectrogram=EEGPSDSpectrogram.objects.create(
                         **{k: self.base64_file(v) for k, v in (lambda s: {
                             'cz':  s.get('cz',  s.get('Cz',  '')),
@@ -287,7 +296,11 @@ class ExperimentView(APIView):
                         faa_stimulation1=self.base64_file(eeg_data['faa'].get('faa_stimulation1')),
                         faa_recovery1=self.base64_file(eeg_data['faa'].get('faa_recovery1')),
                         faa_stimulation2=self.base64_file(eeg_data['faa'].get('faa_stimulation2')),
-                        faa_recovery2=self.base64_file(eeg_data['faa'].get('faa_recovery2'))
+                        faa_recovery2=self.base64_file(eeg_data['faa'].get('faa_recovery2')),
+                        # 6-phase 전용 키 — 있을 때만 넣는다 (컬럼 null 허용)
+                        **{k: self.base64_file(eeg_data['faa'][k])
+                           for k in ('faa_stimulation3', 'faa_stimulation4', 'faa_recovery')
+                           if eeg_data['faa'].get(k)}
                     ),
                 )
 
@@ -522,12 +535,19 @@ BAND_FIGURE_ROWS = (
 # 연결성 변화를 추적할 단계. EEG 모델의 ForeignKey 이름과 같아야 한다.
 # 구간 표기는 리포트 전체에서 한 벌이어야 한다. PDF 의 _kPhaseLabel 과 반드시
 # 같은 문자열을 쓴다 — 다르면 같은 문서 안에 두 가지 이름이 나온다.
+#
+# 5-phase(baseline, stim1, rec1, stim2, rec2)와 6-phase(baseline, stim1~4,
+# recovery) 키의 합집합을 시간 순서로 나열한 것이다. 세션마다 없는 phase 는
+# FK 가 None 이라 걸러지는데, 걸러낸 결과의 상대 순서가 두 모드 모두 올바르다.
 CONNECTIVITY_PHASES = (
     ('baseline',     '기준'),
     ('stimulation1', '1차 자극'),
     ('recovery1',    '1차 회복'),
     ('stimulation2', '2차 자극'),
     ('recovery2',    '2차 회복'),
+    ('stimulation3', '3차 자극'),
+    ('stimulation4', '4차 자극'),
+    ('recovery',     '회복'),
 )
 
 # 대역별 생리적 의미. 일반인이 읽는 리포트라 AI 가 지어내지 않도록 근거를 고정한다.
@@ -928,13 +948,15 @@ def _collect_report_data(exp) -> dict:
 
     # HRV 단계별
     hrv = exp.hrv
-    phase_defs = [
-        ('Baseline',     '기준',      hrv.baseline     if hrv else None),
-        ('Stimulation1', '1차 자극',  hrv.stimulation1 if hrv else None),
-        ('Recovery1',    '1차 회복',  hrv.recovery1    if hrv else None),
-        ('Stimulation2', '2차 자극',  hrv.stimulation2 if hrv else None),
-        ('Recovery2',    '2차 회복',  hrv.recovery2    if hrv else None),
-    ]
+    # 존재하는 phase 만 담는다. CONNECTIVITY_PHASES 가 합집합을 시간 순서로
+    # 나열하므로, 없는 것을 거르면 5/6-phase 모두 올바른 순서가 된다.
+    phase_defs = []
+    if hrv:
+        for _attr, _ko in CONNECTIVITY_PHASES:
+            _obj = getattr(hrv, _attr, None)
+            if _obj is None:
+                continue
+            phase_defs.append((_attr[0].upper() + _attr[1:], _ko, _obj))
     hrv_phases = []
     for name_en, name_ko, obj in phase_defs:
         d = _hrv_phase_summary(obj)
@@ -1001,7 +1023,7 @@ def _collect_report_data(exp) -> dict:
 
 # 설문 척도별 (표시명, 무엇을 재나, 기준 안내). 리포트 7-1 표를 그대로 채운다.
 QUESTIONNAIRE_SCALES = (
-    ('irls',      'IRLS',       '다리 불편감',    '0~10 경도, 11~20 중등도, 21~30 중증, 31+ 매우 중증'),
+    ('irls',      'IRLS',       '다리 불편감',    '0~40점. 1~10 경도, 11~20 중등도, 21~30 중증, 31~40 매우 중증'),
     ('psql',      'PSQI-K',     '수면의 질',      '5점 초과면 수면의 질이 나쁜 편'),
     ('isi',       'ISI',        '불면 심각도',    '0~7 없음, 8~14 경도, 15~21 중등도, 22+ 중증'),
     ('ess',       'ESS',        '주간 졸림',      '0~10 정상, 11~15 경도, 16+ 과다'),
@@ -1337,7 +1359,8 @@ JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 - bands 는 위에 나열된 대역과 같은 순서·같은 개수로 작성하세요.
 - domains 는 위 5개를 그 순서 그대로 작성하세요.
 - evidence.hrv.phase_notes 의 "phase" 는 위 [심박변이도 — 구간별] 에 나온 영문 키를
-  (baseline, stimulation1, recovery1, stimulation2, recovery2) 소문자 그대로 쓰세요.
+  (baseline, stimulation1, recovery1, stimulation2, recovery2, stimulation3,
+  stimulation4, recovery) 중 위 데이터에 실제로 나온 키만 소문자 그대로 쓰세요.
   한글 이름을 넣으면 표에 연결되지 않습니다. 실제 존재하는 구간 수만큼 작성하세요.
 - evidence.eeg.band_captions 는 첨부된 대역 수만큼 작성하세요.
 - summary.domain_table 은 domains 와 같은 순서·같은 개수로 작성하세요.
@@ -1467,8 +1490,10 @@ def _report_queryset():
     return Experiments.objects.select_related(
         'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
         'hrv__stimulation2', 'hrv__recovery2',
+        'hrv__stimulation3', 'hrv__stimulation4', 'hrv__recovery',
         'eeg__baseline', 'eeg__stimulation1', 'eeg__recovery1',
         'eeg__stimulation2', 'eeg__recovery2',
+        'eeg__stimulation3', 'eeg__stimulation4', 'eeg__recovery',
         'eeg__faa', 'eeg__psd_spectrogram',
         'questionnaire', 'report',
     )
