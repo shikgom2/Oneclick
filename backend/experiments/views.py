@@ -7,9 +7,11 @@ import os
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import anthropic
 import httpx
+from http.client import HTTPException
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.views import APIView
@@ -1827,10 +1829,13 @@ ANALYSIS_RELAY_MAX_BYTES = 600 * 1024 * 1024
 
 
 def _analysis_not_configured():
+    # 설정 방법(uwsgi env 이름)은 로그에만 남긴다. 이 API 는 인터넷에
+    # 노출되어 있어 응답에 내부 구성을 실으면 안 된다.
+    logger.error('[분석중계] ONECLICK_ANALYSIS_SERVER 미설정 — uwsgi ini 에 '
+                 'env = ONECLICK_ANALYSIS_SERVER=<연구실서버IP>:8500 을 '
+                 '추가하고 재시작해야 한다.')
     return JsonResponse(
-        {'error': '분석 중계 대상이 설정돼 있지 않습니다. uwsgi ini 에 '
-                  'env = ONECLICK_ANALYSIS_SERVER=<연구실서버IP>:8500 을 '
-                  '추가하고 재시작하세요.'},
+        {'error': '분석 중계가 설정돼 있지 않습니다. 관리자에게 문의하세요.'},
         status=503)
 
 
@@ -1853,11 +1858,14 @@ def _relay(url, body=None, length=0, timeout=30):
         # 분석 서버가 만든 4xx/5xx JSON(누락 항목 안내 등)은 그대로 통과
         return HttpResponse(e.read(), status=e.code,
                             content_type='application/json; charset=utf-8')
-    except (urllib.error.URLError, OSError) as e:
-        logger.error('[분석중계] 분석 서버(%s) 연결 실패: %s', ANALYSIS_SERVER, e)
+    except (urllib.error.URLError, OSError, ValueError, HTTPException) as e:
+        # ValueError/HTTPException: 조작된 쿼리·헤더가 http.client 안에서
+        # 터지는 경우까지 잡는다. 500 트레이스백으로 새지 않게 한다.
+        # 내부망 주소·오류 상세는 로그에만 남긴다 — 응답은 일반 문구.
+        logger.error('[분석중계] 분석 서버(%s) 전달 실패: %s', ANALYSIS_SERVER, e)
         return JsonResponse(
-            {'error': '분석 서버(%s)에 연결할 수 없습니다: %s'
-                      % (ANALYSIS_SERVER, e)},
+            {'error': '분석 서버에 연결할 수 없습니다. 잠시 후 다시 시도하고, '
+                      '반복되면 관리자에게 문의하세요.'},
             status=502)
 
 
@@ -1868,13 +1876,28 @@ def analysis_relay_submit(request):
         return JsonResponse({'error': 'POST 만 지원합니다.'}, status=405)
     if not ANALYSIS_SERVER:
         return _analysis_not_configured()
-    length = int(request.META.get('CONTENT_LENGTH') or 0)
+    try:
+        length = int(request.META.get('CONTENT_LENGTH') or 0)
+    except ValueError:
+        return JsonResponse({'error': 'Content-Length 가 올바르지 않습니다.'},
+                            status=400)
     if length <= 0:
         return JsonResponse({'error': '본문에 CSV 를 실어 보내 주세요.'},
                             status=400)
     if length > ANALYSIS_RELAY_MAX_BYTES:
         return JsonResponse({'error': '파일이 너무 큽니다 (%dMB).'
                                       % (length >> 20)}, status=413)
+
+    # 필수 항목은 여기서 먼저 검사한다. 분석 서버에 맡기면 그쪽이 본문을
+    # 읽지 않고 400 을 보내며 소켓을 닫아, 150MB 를 전달하던 중계 입장에선
+    # RST(502) 로 보인다 — 안내 문구가 사용자까지 못 간다.
+    raw_qs = request.META.get('QUERY_STRING', '')
+    qs = {k: v[0] for k, v in urllib.parse.parse_qs(raw_qs).items()}
+    missing = [k for k in ('name', 'age', 'birth', 'sex', 'measurement_date')
+               if not qs.get(k, '').strip()]
+    if missing:
+        return JsonResponse({'error': '필수 항목 누락: %s' % ', '.join(missing)},
+                            status=400)
 
     # 본문을 임시 파일로 받는다. request.body 는 전체를 메모리에 올리므로
     # 150MB 급 측정 CSV 에는 쓰지 않는다. 파일은 with 를 벗어나며 지워진다.
@@ -1891,12 +1914,16 @@ def analysis_relay_submit(request):
                 {'error': '본문이 %d바이트 부족하게 끊겼습니다.' % remain},
                 status=400)
         spool.seek(0)
-        url = 'http://%s/jobs?%s' % (ANALYSIS_SERVER,
-                                     request.META.get('QUERY_STRING', ''))
+        # 쿼리는 재인코딩해서 붙인다. 원문 그대로 이으면 percent-encoding 을
+        # 안 거친 바이트가 섞였을 때 http.client 가 요청줄 조립에서 터진다.
+        safe_qs = urllib.parse.urlencode(qs)
+        url = 'http://%s/jobs?%s' % (ANALYSIS_SERVER, safe_qs)
         logger.info('[분석중계] 제출 전달 %.1fMB -> %s',
                     length / 1e6, ANALYSIS_SERVER)
-        # 내부망 전송 시간이 본문 크기에 비례하므로 조회보다 여유를 둔다
-        return _relay(url, body=spool, length=length, timeout=300)
+        # 내부망 전송이라 실측은 수십 초면 충분하다. uwsgi harakiri(480 예정)
+        # 보다 확실히 짧게 잡아, 늦어질 때 워커 강제종료 대신 502 로 끝나게
+        # 한다 — 본문 수신 시간도 같은 harakiri 예산에서 나가기 때문이다.
+        return _relay(url, body=spool, length=length, timeout=120)
 
 
 def analysis_relay_status(request, job_id):
