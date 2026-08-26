@@ -4,9 +4,14 @@ import io
 import json
 import logging
 import os
+import tempfile
 import time
+import urllib.error
+import urllib.request
 import anthropic
 import httpx
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
@@ -1803,4 +1808,102 @@ class AIReportGenerateView(AIReportView):
             detail = str(resp.data.get('error', ''))
         return Response({'status': 'failed', 'pk': pk, 'error': detail},
                         status=resp.status_code)
+
+
+# ── 원격 분석 중계 ────────────────────────────────────────────────────
+# 측정 PC(외부망)는 연구실 분석 서버(내부망)에 직접 닿지 못하고, 외부에서
+# 접근 가능한 건 이 웹서버뿐이다. 그래서 제출/조회를 분석 서버로 그대로
+# 전달한다. 무상태 프록시 — DB 도 디스크 보관도 없다. 프로토콜이
+# analysis_server.py 와 같아서 remote_submit.py 쪽은 --SERVER 에
+# '<웹서버주소>/api/v1/exp/analysis' 를 넣는 것 말고는 차이가 없다.
+#
+# 대상 주소는 환경변수로만 받는다. 연구실 서버 IP 를 코드에 박으면 서버가
+# 바뀔 때마다 재배포해야 하고, 이 백엔드는 FTP 복사로 배포되므로 코드와
+# 설정은 최대한 분리해 둔다.
+ANALYSIS_SERVER = os.environ.get('ONECLICK_ANALYSIS_SERVER', '')
+# analysis_server.py 의 MAX_UPLOAD_BYTES 와 같은 값. 여기서 먼저 거르면
+# 넘칠 파일을 내부망까지 옮기지 않는다.
+ANALYSIS_RELAY_MAX_BYTES = 600 * 1024 * 1024
+
+
+def _analysis_not_configured():
+    return JsonResponse(
+        {'error': '분석 중계 대상이 설정돼 있지 않습니다. uwsgi ini 에 '
+                  'env = ONECLICK_ANALYSIS_SERVER=<연구실서버IP>:8500 을 '
+                  '추가하고 재시작하세요.'},
+        status=503)
+
+
+def _relay(url, body=None, length=0, timeout=30):
+    """분석 서버로 전달하고 응답(JSON)을 그대로 돌려준다.
+
+    requests 는 서버 venv 에 없을 수 있어 표준 라이브러리로만 보낸다.
+    urllib 은 파일 본문일 때 Content-Length 를 스스로 못 정하므로 명시한다.
+    """
+    req = urllib.request.Request(
+        url, data=body, method='POST' if body is not None else 'GET')
+    if body is not None:
+        req.add_header('Content-Length', str(length))
+        req.add_header('Content-Type', 'application/octet-stream')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return HttpResponse(resp.read(), status=resp.status,
+                                content_type='application/json; charset=utf-8')
+    except urllib.error.HTTPError as e:
+        # 분석 서버가 만든 4xx/5xx JSON(누락 항목 안내 등)은 그대로 통과
+        return HttpResponse(e.read(), status=e.code,
+                            content_type='application/json; charset=utf-8')
+    except (urllib.error.URLError, OSError) as e:
+        logger.error('[분석중계] 분석 서버(%s) 연결 실패: %s', ANALYSIS_SERVER, e)
+        return JsonResponse(
+            {'error': '분석 서버(%s)에 연결할 수 없습니다: %s'
+                      % (ANALYSIS_SERVER, e)},
+            status=502)
+
+
+@csrf_exempt
+def analysis_relay_submit(request):
+    """POST /api/v1/exp/analysis/jobs — 본문(CSV)을 분석 서버로 전달."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST 만 지원합니다.'}, status=405)
+    if not ANALYSIS_SERVER:
+        return _analysis_not_configured()
+    length = int(request.META.get('CONTENT_LENGTH') or 0)
+    if length <= 0:
+        return JsonResponse({'error': '본문에 CSV 를 실어 보내 주세요.'},
+                            status=400)
+    if length > ANALYSIS_RELAY_MAX_BYTES:
+        return JsonResponse({'error': '파일이 너무 큽니다 (%dMB).'
+                                      % (length >> 20)}, status=413)
+
+    # 본문을 임시 파일로 받는다. request.body 는 전체를 메모리에 올리므로
+    # 150MB 급 측정 CSV 에는 쓰지 않는다. 파일은 with 를 벗어나며 지워진다.
+    with tempfile.TemporaryFile() as spool:
+        remain = length
+        while remain > 0:
+            chunk = request.read(min(1 << 20, remain))
+            if not chunk:
+                break
+            spool.write(chunk)
+            remain -= len(chunk)
+        if remain > 0:
+            return JsonResponse(
+                {'error': '본문이 %d바이트 부족하게 끊겼습니다.' % remain},
+                status=400)
+        spool.seek(0)
+        url = 'http://%s/jobs?%s' % (ANALYSIS_SERVER,
+                                     request.META.get('QUERY_STRING', ''))
+        logger.info('[분석중계] 제출 전달 %.1fMB -> %s',
+                    length / 1e6, ANALYSIS_SERVER)
+        # 내부망 전송 시간이 본문 크기에 비례하므로 조회보다 여유를 둔다
+        return _relay(url, body=spool, length=length, timeout=300)
+
+
+def analysis_relay_status(request, job_id):
+    """GET /api/v1/exp/analysis/jobs/<id> — 작업 상태 조회 전달."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET 만 지원합니다.'}, status=405)
+    if not ANALYSIS_SERVER:
+        return _analysis_not_configured()
+    return _relay('http://%s/jobs/%d' % (ANALYSIS_SERVER, job_id))
 
