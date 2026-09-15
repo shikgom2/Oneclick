@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+{# 토큰 URL 이 외부(구글 폼 등)로 Referer 에 실려 나가지 않게. 응답 헤더와 이중으로 막는다. #}
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="format-detection" content="telephone=no">
+{# 제목에는 이름을 넣지 않는다. 탭 목록·방문 기록 동기화로 다른 기기에 노출될 수 있다. #}
+<title>{% block title %}수면·이완 체험{% endblock %}</title>
+<style>
+:root {
+  --bg: #f3f5f8; --card: #ffffff; --text: #1c2330; --muted: #5a6574; --line: #e1e5ea;
+  --accent: #2f6fde; --accent-dark: #2459b8; --soft: #eef3fc;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.6; word-break: keep-all; overflow-wrap: anywhere;
+}
+.wrap { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; }
+.card { background: var(--card); border-radius: 16px; padding: 20px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(16, 24, 40, .06); }
+h1 { font-size: 1.35rem; line-height: 1.4; margin: 0 0 10px; }
+h2 { font-size: 1.1rem; line-height: 1.4; margin: 0 0 12px; }
+h3 { font-size: 1rem; line-height: 1.4; margin: 0 0 4px; }
+p { margin: 0 0 10px; }
+.center { text-align: center; }
+.muted { color: var(--muted); }
+.small { font-size: .86rem; }
+.btn {
+  display: block; width: 100%; margin: 14px 0 6px; padding: 15px 18px; border: 0; border-radius: 12px;
+  background: var(--accent); color: #fff; font: inherit; font-size: 1.05rem; font-weight: 700;
+  text-align: center; text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.btn:active { background: var(--accent-dark); }
+.btn[disabled] { opacity: .6; cursor: default; }
+.btn-secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+.btn-secondary:active { background: var(--soft); }
+.label-big { font-size: 2.8rem; font-weight: 800; letter-spacing: .03em; line-height: 1.2; text-align: center; margin: 6px 0 14px; font-variant-numeric: tabular-nums; }
+.spinner { width: 44px; height: 44px; margin: 18px auto; border: 4px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: booth-spin 1s linear infinite; }
+@keyframes booth-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+{% block extra_style %}{% endblock %}
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff; font-size: 12pt; }
+  .wrap { max-width: none; padding: 0; }
+  .card { box-shadow: none; border: 1px solid var(--line); break-inside: avoid; }
+}
+</style>
+</head>
+<body{% block body_attrs %}{% endblock %}>
+{% block body %}{% endblock %}
+{% block script %}{% endblock %}
+</body>
+</html>

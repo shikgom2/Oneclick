@@ -1,0 +1,12 @@
+{% extends "booth/base.html" %}
+{# 404·503 등 짧은 안내 화면. 제목과 문장은 뷰가 고정 문구로만 넘긴다. #}
+{% block title %}{{ title }}{% endblock %}
+{% block body %}
+<main class="wrap">
+  <section class="card">
+    <h1>{{ title }}</h1>
+    {% for line in lines %}<p>{{ line }}</p>{% endfor %}
+    {% if action_url %}<a class="btn" href="{{ action_url }}">{{ action_label }}</a>{% endif %}
+  </section>
+</main>
+{% endblock %}

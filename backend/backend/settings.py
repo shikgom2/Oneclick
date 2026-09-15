@@ -59,6 +59,7 @@ LOCAL_APPS = [
     'eeg',
     'survey',
     'report',
+    'booth',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -232,4 +233,44 @@ LOGGING = {
             'propagate': False,             # 루트로 다시 올라가 중복 출력되지 않게
         },
     },
+}
+
+
+# ---------------------------------------------------------------------------
+# booth: 전시 부스 체험 AI 리포트 앱 (booth/README.md 참고)
+#
+# 체험자 이름·설문 응답 같은 단기 개인정보는 운영 MySQL(default)에 섞지 않는다.
+# 보유기간(기본 14일)이 지나면 행째로 지우는 데이터라 별도 SQLite 파일에 두고,
+# BoothRouter 가 booth 앱 모델만 이 DB 로 보낸다. 다른 앱에는 라우터가 None 을
+# 돌려주므로 기존 DB 동작은 그대로다.
+#
+# 마이그레이션은 반드시 booth DB 로만 적용한다:
+#     python manage.py migrate booth --database=booth
+# timeout 20초: uWSGI 워커 여러 개가 동시에 쓸 때 SQLite 쓰기 잠금을 기다리는 시간.
+# 파일이 있는 폴더에 uWSGI 실행 사용자의 쓰기 권한이 필요하다(WAL 이 -wal/-shm 파일을 만든다).
+# BOOTH_DB_PATH 는 backend/.env 에 backend 폴더 밖 경로로 둔다(FTP 동기화에 실명 DB 가 섞이지 않게).
+#
+# 이 블록은 운영 서버의 settings.py 맨 끝에 손으로 붙여 넣는다(서버 사본은 저장소와 다를 수 있다).
+# 그래서 앞부분에 LOGGING·DATABASE_ROUTERS 가 있든 없든 동작하게 쓴다. settings 로드가 실패하면
+# 같은 uWSGI 의 모든 앱(8443 중계 포함)이 멈춘다.
+# ---------------------------------------------------------------------------
+BOOTH_DB_PATH = os.environ.get('BOOTH_DB_PATH') or str(BASE_DIR / 'booth.sqlite3')
+DATABASES['booth'] = {
+    'ENGINE': 'django.db.backends.sqlite3',
+    'NAME': BOOTH_DB_PATH,
+    'OPTIONS': {'timeout': 20},
+}
+# 기존 라우터가 있으면 지우지 않고 booth 라우터만 한 번 더한다.
+DATABASE_ROUTERS = [
+    router for router in globals().get('DATABASE_ROUTERS', []) if router != 'booth.routers.BoothRouter'
+] + ['booth.routers.BoothRouter']
+
+# booth 로거를 INFO 로 올린다. 위 experiments 와 같은 이유로, 설정이 없으면 리포트 생성
+# 계측 로그(모델, 토큰 수, 소요 시간)가 루트(WARNING)에서 전부 버려진다.
+_booth_logging = globals().setdefault('LOGGING', {'version': 1, 'disable_existing_loggers': False})
+_booth_logging.setdefault('handlers', {}).setdefault('console', {'class': 'logging.StreamHandler'})
+_booth_logging.setdefault('loggers', {})['booth'] = {
+    'handlers': ['console'],
+    'level': 'INFO',
+    'propagate': False,
 }

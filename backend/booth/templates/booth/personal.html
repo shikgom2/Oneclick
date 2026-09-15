@@ -1,0 +1,265 @@
+{% extends "booth/base.html" %}
+{# 체험자 개인 페이지. state 는 views_pages._page_state 참고. 모든 출력은 자동 이스케이프(|safe 금지). #}
+{% block extra_style %}
+.report .headline { font-size: 1.15rem; font-weight: 700; line-height: 1.5; margin: 12px 0 8px; }
+.report .ai { white-space: pre-line; }
+.report .item + .item { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.table-wrap { overflow-x: auto; }
+.cmp { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.cmp caption { caption-side: top; text-align: left; font-weight: 700; color: var(--muted); font-size: .9rem; padding: 0 0 8px; }
+.cmp th, .cmp td { padding: 10px 8px; border-bottom: 1px solid var(--line); }
+.cmp thead th { font-size: .85rem; color: var(--muted); font-weight: 600; text-align: right; }
+.cmp thead th:first-child, .cmp tbody th { text-align: left; }
+.cmp tbody th { font-weight: 600; }
+.cmp .gloss { display: block; font-size: .78rem; font-weight: 400; color: var(--muted); }
+.gloss-inline { font-size: .85rem; font-weight: 400; color: var(--muted); }
+.cmp td { text-align: right; font-size: 1.05rem; font-weight: 700; white-space: nowrap; }
+.tips { margin: 0; padding-left: 1.2em; }
+.tips li + li { margin-top: 8px; }
+.report-footer { margin: 18px 4px 0; color: var(--muted); font-size: .86rem; }
+.report-footer p { margin: 0 0 4px; }
+.new-link { margin-top: 26px; }
+.new-link a { color: var(--muted); }
+{% endblock %}
+{% block body_attrs %} data-state="{{ state }}" data-status-url="{{ status_url }}" data-generate-url="{{ generate_url }}" data-survey="{{ survey_received|yesno:'1,0' }}" data-measurement="{{ measurement_received|yesno:'1,0' }}" data-report-status="{{ report_status }}" data-poll-ms="{{ poll_ms }}" data-max-poll-sec="{{ max_poll_sec }}" data-regenerate-after-sec="{{ regenerate_after_sec }}"{% endblock %}
+{% block body %}
+<main class="wrap">
+{% if state == 'done' %}
+  {% include "booth/_report.html" %}
+{% else %}
+  <section class="card">
+  {% if state == 'before_survey' %}
+    <p class="muted center">참가자 번호</p>
+    <p class="label-big">{{ label }}</p>
+    <p>아래 버튼을 눌러 설문을 작성해 주세요. 참가자 번호와 확인 코드는 설문에 자동으로 입력됩니다. 고치지 말고 그대로 제출해 주세요.</p>
+    <a class="btn" href="{{ survey_url }}" target="_blank" rel="noopener noreferrer">설문하기</a>
+    <p class="muted small">설문을 제출하고 이 화면으로 돌아오면 다음 안내가 자동으로 표시됩니다.</p>
+
+  {% elif state == 'no_consent' %}
+    {# 동의가 없으므로 이름·응답은 저장하지 않았고 화면에도 쓰지 않는다. #}
+    <h1>AI 리포트를 제공할 수 없습니다</h1>
+    <p>개인정보 수집·이용에 동의하지 않으셔서 체험 리포트를 만들 수 없습니다. 입력하신 이름과 설문 응답, 측정값은 저장하지 않았습니다.</p>
+    <p>측정과 자극 체험은 그대로 참여하실 수 있습니다.</p>
+    <p class="muted">리포트를 받고 싶으시면 설문을 다시 작성하면서 모든 동의 문항에 동의를 선택해 주세요. 이미 측정을 마치셨다면 측정을 한 번 더 해야 합니다.</p>
+    <a class="btn btn-secondary" href="{{ survey_url }}" target="_blank" rel="noopener noreferrer">설문 다시 작성하기</a>
+    <p class="muted small center">참가자 번호 {{ label }}</p>
+
+  {% elif state == 'after_survey' %}
+    <h1>{{ name_display }}님, 설문이 접수되었습니다</h1>
+    <p>체험 태블릿이 있는 곳으로 이동해 주세요. 스태프가 확인한 뒤 측정을 시작합니다.</p>
+    <p class="muted">측정이 끝나면 이 페이지에 리포트가 표시됩니다. 페이지를 닫았다면 체험 태블릿에 나오는 QR 코드로 다시 열 수 있습니다.</p>
+    <p class="muted small center">참가자 번호 {{ label }}</p>
+
+  {% elif state == 'generating' %}
+    <h1>{{ name_display }}님의 리포트를 만들고 있습니다</h1>
+    <div id="gen-wait">
+      <div class="spinner" role="status" aria-label="리포트 생성 중"></div>
+      <p class="center">보통 1~2분 정도 걸립니다. 완성되면 이 화면에 자동으로 표시됩니다.</p>
+    </div>
+    {# 생성 요청이 여러 번 처리되지 않았을 때(서버 오류·연결 끊김) 스피너 대신 보인다. #}
+    <div id="stuck" hidden>
+      <p>리포트 생성 요청이 처리되지 않았습니다. 아래 버튼을 눌러 다시 시도해 주세요.</p>
+      <button type="button" class="btn no-print" id="stuck-btn">다시 시도</button>
+      <p class="muted small center">계속되면 부스 스태프에게 참가자 번호 {{ label }} 를 알려 주세요.</p>
+    </div>
+
+  {% elif state == 'failed' %}
+    <h1>리포트를 만들지 못했습니다</h1>
+    <p>리포트 생성에 실패했습니다. 잠시 후 아래 버튼을 눌러 다시 시도해 주세요. 계속 실패하면 부스 스태프에게 참가자 번호를 알려 주세요.</p>
+    <div class="spinner" id="retry-spinner" role="status" aria-label="리포트 생성 중" hidden></div>
+    <button type="button" class="btn no-print" id="retry-btn">다시 시도</button>
+    <p class="muted small center">참가자 번호 {{ label }}</p>
+
+  {% elif state == 'failed_final' %}
+    <h1>리포트를 만들지 못했습니다</h1>
+    <p>여러 번 시도했지만 리포트를 만들지 못했습니다. 부스 스태프에게 참가자 번호를 알려 주세요.</p>
+    <p class="muted small center">참가자 번호 {{ label }}</p>
+
+  {% else %}
+    <h1>리포트를 표시할 수 없습니다</h1>
+    <p>부스 스태프에게 참가자 번호를 알려 주세요.</p>
+    <p class="muted small center">참가자 번호 {{ label }}</p>
+  {% endif %}
+    <div id="poll-stopped" hidden>
+      <p class="muted small">자동 확인이 멈췄습니다. 아래 버튼을 눌러 새로고침해 주세요.</p>
+      <button type="button" class="btn btn-secondary no-print" id="poll-reload-btn">새로고침</button>
+    </div>
+  </section>
+  <p class="muted small center">이 페이지는 본인 전용입니다. 주소를 다른 사람과 공유하지 마세요.<br>입력하신 정보는 {{ deletion_date }}에 삭제됩니다.</p>
+{% endif %}
+  <p class="small center no-print new-link"><a href="{{ new_url }}" rel="nofollow" id="new-link">같은 휴대폰으로 다른 분이 체험하시나요? 새 번호 받기</a></p>
+</main>
+{% endblock %}
+{% block script %}
+<script>
+(function () {
+  var body = document.body;
+  var state = body.getAttribute('data-state');
+  var statusUrl = body.getAttribute('data-status-url');
+  var generateUrl = body.getAttribute('data-generate-url');
+  var pollMs = parseInt(body.getAttribute('data-poll-ms'), 10) || 4000;
+  var maxPollMs = (parseInt(body.getAttribute('data-max-poll-sec'), 10) || 1800) * 1000;
+  // 렌더링 당시 서버 값. 상태 JSON 이 이것과 달라졌을 때만 새로고침해 무한 새로고침을 막는다.
+  var rendered = {
+    survey: body.getAttribute('data-survey') === '1',
+    measurement: body.getAttribute('data-measurement') === '1',
+    status: body.getAttribute('data-report-status'),
+    state: state
+  };
+  var POLL_STATES = { before_survey: true, no_consent: true, after_survey: true, generating: true };
+  // 생성 요청은 페이지당 한 번이 원칙이다. 요청이 서버에 닿지 못했거나(pending 그대로) 생성하던 워커가
+  // 죽은 경우(generating 이 오래 지속)에만 몇 번 더 보낸다. 중복 생성은 서버의 DB claim 이 막는다.
+  var MAX_GENERATE_CALLS = 3;
+  // 멈춘 generating 을 다시 요청하기까지. 서버의 멈춤 판정보다 길게 서버가 정해 준다.
+  var REGENERATE_AFTER_MS = (parseInt(body.getAttribute('data-regenerate-after-sec'), 10) || 310) * 1000;
+  // 오류·연결 끊김 뒤 다시 요청하기까지. 곧바로 다시 보내 요청 횟수를 한꺼번에 쓰지 않게 한다.
+  var RETRY_DELAY_MS = 8000;
+  var startedAt = Date.now();
+  var generateCalls = 0;
+  var generateInFlight = false;
+  var generateTimer = null;
+  var lastGenerateAt = 0;
+  var polling = false;
+  var timer = null;
+  var reloading = false;
+
+  function group(status) { return (status === 'pending' || status === 'generating') ? 'working' : status; }
+
+  function changed(data) {
+    return data.survey_received !== rendered.survey ||
+      data.measurement_received !== rendered.measurement ||
+      group(data.report_status) !== group(rendered.status) ||
+      (typeof data.state === 'string' && data.state !== rendered.state);
+  }
+
+  function reload() {
+    if (reloading) { return; }
+    reloading = true;
+    window.location.reload();
+  }
+
+  function readJson(response) {
+    if (response.status === 404) { reload(); return null; }
+    return response.json().catch(function () { return null; });
+  }
+
+  function showStuck() {
+    var stuck = document.getElementById('stuck');
+    if (!stuck || !stuck.hidden) { return; }
+    var wait = document.getElementById('gen-wait');
+    if (wait) { wait.hidden = true; }
+    stuck.hidden = false;
+  }
+
+  function laterGenerate(ms) {
+    if (generateTimer !== null || reloading) { return; }
+    generateTimer = setTimeout(function () {
+      generateTimer = null;
+      requestGenerate(onGenerated);
+    }, ms);
+  }
+
+  // 생성 요청의 응답. 대기(retry_after_sec)는 요청 횟수에 넣지 않고, 오류는 잠시 뒤 다시 보낸다.
+  function onGenerated(data) {
+    if (!data) { laterGenerate(RETRY_DELAY_MS); return; }   // 연결 끊김 등: 서버는 계속 생성할 수 있어 폴링도 함께 확인한다
+    if (typeof data.report_status === 'string' && changed(data)) { reload(); return; }
+    if (data.error) { laterGenerate(RETRY_DELAY_MS); return; }
+    if (typeof data.retry_after_sec === 'number') {
+      generateCalls = Math.max(generateCalls - 1, 0);
+      laterGenerate(Math.max(data.retry_after_sec, 1) * 1000);
+    }
+  }
+
+  // 폴링 결과
+  function handle(data) {
+    if (!data || typeof data.report_status !== 'string') { return; }
+    if (changed(data)) { reload(); return; }
+    if (state !== 'generating' || generateInFlight || generateTimer !== null) { return; }
+    if (data.report_status === 'pending' || Date.now() - lastGenerateAt > REGENERATE_AFTER_MS) {
+      if (generateCalls >= MAX_GENERATE_CALLS) {
+        if (data.report_status === 'pending') { showStuck(); }
+        return;
+      }
+      requestGenerate(onGenerated);
+    }
+  }
+
+  function requestGenerate(onDone) {
+    if (generateInFlight || generateCalls >= MAX_GENERATE_CALLS) { return; }
+    generateInFlight = true;
+    generateCalls += 1;
+    lastGenerateAt = Date.now();
+    fetch(generateUrl, { method: 'POST', cache: 'no-store', headers: { 'Accept': 'application/json' } })
+      .then(readJson)
+      .catch(function () { return null; })
+      .then(function (data) {
+        generateInFlight = false;
+        onDone(data);
+      });
+  }
+
+  function schedule() {
+    if (reloading || timer !== null || document.hidden) { return; }
+    timer = setTimeout(poll, pollMs);
+  }
+
+  function poll() {
+    timer = null;
+    if (reloading || polling || document.hidden) { return; }
+    if (Date.now() - startedAt > maxPollMs) {
+      document.getElementById('poll-stopped').hidden = false;
+      return;
+    }
+    polling = true;
+    fetch(statusUrl, { cache: 'no-store', headers: { 'Accept': 'application/json' } })
+      .then(function (response) { return response.ok || response.status === 404 ? readJson(response) : null; })
+      .then(handle)
+      .catch(function () { /* 일시적 네트워크 오류는 다음 폴링에서 다시 확인 */ })
+      .then(function () { polling = false; schedule(); });
+  }
+
+  if (POLL_STATES[state]) {
+    // 설문 폼을 새 탭으로 열었다가 돌아온 경우 등, 화면이 다시 보이면 곧바로 확인한다.
+    // 숨겨진 탭은 요청하지 않으므로 폴링 시간 제한도 다시 센다(오래 줄을 섰다 돌아온 경우).
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { return; }
+      startedAt = Date.now();
+      document.getElementById('poll-stopped').hidden = true;
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      poll();
+    });
+    if (state === 'generating') { requestGenerate(onGenerated); }
+    schedule();
+  }
+
+  var retryBtn = document.getElementById('retry-btn');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', function () {
+      retryBtn.disabled = true;
+      document.getElementById('retry-spinner').hidden = false;
+      // 결과가 무엇이든(완료·실패·타임아웃) 새로 그려 서버의 현재 상태를 보여준다.
+      requestGenerate(function () { reload(); });
+    });
+  }
+
+  ['stuck-btn', 'poll-reload-btn'].forEach(function (id) {
+    var button = document.getElementById(id);
+    if (button) { button.addEventListener('click', function () { reload(); }); }
+  });
+
+  var printBtn = document.getElementById('print-btn');
+  if (printBtn) {
+    printBtn.addEventListener('click', function () { window.print(); });
+  }
+
+  var newLink = document.getElementById('new-link');
+  if (newLink) {
+    newLink.addEventListener('click', function (event) {
+      if (!window.confirm('새 참가자 번호를 받습니다. 지금 화면은 이 주소를 저장해 둔 경우에만 다시 열 수 있습니다. 계속할까요?')) {
+        event.preventDefault();
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

@@ -34,6 +34,7 @@ urlpatterns = [
     path('api/v1/ecg/', include('ecg.urls')),
     path('api/v1/eeg/', include('eeg.urls')),
     path('api/v1/survey/', include('survey.urls')),
+    path('booth/', include('booth.urls')),
     path('api/v1/report/', include('report.urls'))
 
 

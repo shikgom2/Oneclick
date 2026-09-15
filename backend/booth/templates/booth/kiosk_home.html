@@ -1,0 +1,43 @@
+{% extends "booth/base.html" %}
+{# 공용 키오스크 첫 화면. 이전 체험자의 정보가 절대 남지 않도록 서버 데이터를 하나도 쓰지 않는다. #}
+{% block title %}체험 설문 키오스크{% endblock %}
+{% block extra_style %}
+.kiosk-home { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+.kiosk-home h1 { font-size: 2rem; margin-bottom: 12px; }
+.kiosk-home p { font-size: 1.15rem; }
+.kiosk-home form { width: 100%; max-width: 560px; }
+.btn-huge { font-size: 1.9rem; padding: 34px 24px; border-radius: 22px; margin: 28px 0 22px; }
+{% endblock %}
+{% block body %}
+<main class="kiosk-home">
+  <h1>수면·이완 체험 설문</h1>
+  <p class="muted">버튼을 누르면 참가자 번호가 발급되고 설문이 열립니다.</p>
+  <form method="post" action="{{ new_url }}" id="new-form">
+    <button type="submit" class="btn btn-huge" id="new-btn">새 체험자 시작</button>
+  </form>
+  <p class="muted small">개인 휴대폰으로 참여하시는 분은 부스에 있는 QR 코드를 스캔해 주세요.</p>
+</main>
+{% endblock %}
+{% block script %}
+<script>
+(function () {
+  var form = document.getElementById('new-form');
+  var btn = document.getElementById('new-btn');
+  var label = btn.textContent;
+  var submitting = false;
+  // 연타로 번호가 두 개 발급되지 않게 첫 제출 뒤에는 막는다.
+  form.addEventListener('submit', function (event) {
+    if (submitting) { event.preventDefault(); return; }
+    submitting = true;
+    btn.disabled = true;
+    btn.textContent = '준비 중...';
+  });
+  // 뒤로가기(bfcache)로 돌아왔을 때 버튼이 눌린 상태로 남지 않게 되돌린다.
+  window.addEventListener('pageshow', function () {
+    submitting = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  });
+})();
+</script>
+{% endblock %}

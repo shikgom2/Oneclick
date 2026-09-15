@@ -60,6 +60,8 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+# booth 앱 체험자 DB (개인정보, WAL 의 -wal/-shm 포함)
+booth.sqlite3*
 
 # Flask stuff:
 instance/

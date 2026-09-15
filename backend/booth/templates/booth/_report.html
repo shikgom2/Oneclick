@@ -1,0 +1,73 @@
+{# 완료된 리포트. 비교표 숫자는 서버가 측정값으로 만들고, AI 문장은 자동 이스케이프로만 출력한다. #}
+<article class="report">
+  <header class="card">
+    <p class="muted small">체험일 {{ report_date }} · {{ label }}</p>
+    <h1>{{ name_display }}님의 체험 리포트</h1>
+    <p class="headline ai">{{ report.headline.one_liner }}</p>
+    <p class="ai">{{ report.headline.detail }}</p>
+  </header>
+
+  <section class="card">
+    <h2>체험 전·후 값</h2>
+    <div class="table-wrap">
+      <table class="cmp">
+        <caption>{{ caption }}</caption>
+        <thead><tr><th scope="col">항목</th><th scope="col">체험 전</th><th scope="col">체험 후</th></tr></thead>
+        <tbody>
+        {% for row in rows %}
+          <tr><th scope="row">{{ row.label }}{% if row.gloss %}<span class="gloss">{{ row.gloss }}</span>{% endif %}</th><td>{{ row.before }}</td><td>{{ row.after }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {# 표시값(보정 포함)이든 원 측정값이든 전·후 차이를 효과로 읽지 않도록 항상 알린다. #}
+    {% if is_displayed %}
+    <p class="muted small">체험 화면의 값에는 시연을 위한 보정이 들어 있어, 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다.</p>
+    {% else %}
+    <p class="muted small">짧은 체험 중 한 번 측정한 값이라 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다. 체험 화면에 보였던 값(시연용 보정 포함)과 다를 수 있습니다.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>설문으로 살펴본 생활 습관</h2>
+    {% for item in report.survey_insights %}
+    <div class="item">
+      <h3>{{ item.title }}</h3>
+      <p class="ai">{{ item.body }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <h2>지표 이해하기</h2>
+    {% for item in indices %}
+    <div class="item">
+      <h3>{{ item.label }}{% if item.gloss %} <span class="gloss-inline">({{ item.gloss }})</span>{% endif %}</h3>
+      <p class="ai">{{ item.meaning }}</p>
+      <p class="ai muted">{{ item.reading }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <h2>일상에서 해볼 수 있는 방법</h2>
+    <ul class="tips">
+      {% for tip in report.tips %}<li class="ai">{{ tip }}</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="card">
+    <p class="ai">{{ report.closing }}</p>
+  </section>
+
+  <div class="no-print">
+    <button type="button" class="btn" id="print-btn">PDF로 저장</button>
+    <p class="muted small center">인쇄 화면에서 'PDF로 저장'을 선택하세요. 버튼이 동작하지 않으면 브라우저 메뉴의 인쇄 기능을 이용해 주세요.</p>
+  </div>
+
+  <footer class="report-footer">
+    <p>이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.</p>
+    <p>이 주소를 아는 사람은 누구나 이 리포트를 볼 수 있습니다. 다른 사람에게 보여 주려면 주소 대신 PDF로 저장해 공유해 주세요.</p>
+    <p>이 리포트는 {{ deletion_date }}에 삭제됩니다.</p>
+  </footer>
+</article>
