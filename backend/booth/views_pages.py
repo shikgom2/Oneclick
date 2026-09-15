@@ -6,8 +6,9 @@
   - https 로 들어온 요청만 처리한다(booth_page). 운영 nginx 의 8000 포트는 평문 http 로 모든
     경로를 Django 에 넘기므로, 앱이 거부하지 않으면 이름·건강 정보·토큰이 암호화 없이 오간다.
     443(Let's Encrypt)·8443 은 uwsgi_params 가 HTTPS 를 넘겨 request.is_secure() 가 True 다.
-  - 모든 응답에 Referrer-Policy: no-referrer. 개인 페이지는 구글 폼으로 나가는 링크가 있고,
-    키오스크 페이지는 구글 폼을 iframe 으로 띄운다. Referer 로 토큰 URL 이 구글에 넘어가면 안 된다.
+  - 모든 응답에 Referrer-Policy: no-referrer. QR 시작(/start/)과 개인 페이지의 설문하기(/survey/)는
+    구글 폼으로 302 하고, 키오스크 페이지는 구글 폼을 iframe 으로 띄운다. Referer 로 토큰 URL 이 구글에
+    넘어가면 안 된다.
   - Cache-Control: no-store. 공용 키오스크 태블릿·공유 휴대폰에서 뒤로가기/캐시로 이전 사람의
     화면이 다시 보이지 않게 한다.
   - X-Robots-Tag: noindex. 토큰 URL 이 어떤 경로로든 크롤러에 닿아도 색인되지 않게 한다.
@@ -164,7 +165,7 @@ def booth_page(json_errors=False, kiosk=False, methods=None):
        로그에는 뷰 이름, 예외 종류, 코드 위치만 남긴다(services.log_exception_safely).
     3) 결과 응답(HTML·JSON·리다이렉트·405)에 보안 헤더를 붙이고 django.request 로그에서 뺀다(_finalize).
        리다이렉트에도 헤더를 붙이는 이유:
-       브라우저는 3xx 응답의 Referrer-Policy 로 다음 요청의 정책을 갱신한다. /survey/ 가 구글 폼으로
+       브라우저는 3xx 응답의 Referrer-Policy 로 다음 요청의 정책을 갱신한다. /start/·/survey/ 가 구글 폼으로
        보내는 302 에 no-referrer 가 있어야 토큰 URL 이 구글로 넘어가지 않는다. SecurityMiddleware 는
        Referrer-Policy 를 setdefault 로 넣으므로 여기서 넣은 값이 그대로 유지된다.
 
@@ -234,7 +235,13 @@ def build_form_url(participant, embedded=False):
     base = conf.form_url()
     if not base:
         return ''
-    parts = urlsplit(base)
+    try:
+        parts = urlsplit(base)
+    except ValueError:
+        # 'https://[docs...' 같은 오타는 urlsplit 이 ValueError 를 낸다. 그대로 두면 500 이 되어 인쇄 QR 은
+        # 번호만 발급하고 쿠키 없이 끝나(다시 찍을 때마다 번호가 쌓인다) 없는 주소와 같이 '' 로 돌린다.
+        logger.warning('[booth] BOOTH_FORM_URL 이 http(s) 주소가 아니라 무시합니다.')
+        return ''
     # iframe src·Location 에 들어가는 값이라 javascript: 같은 스킴은 설정 오류로 본다.
     if parts.scheme not in ('http', 'https') or not parts.netloc:
         logger.warning('[booth] BOOTH_FORM_URL 이 http(s) 주소가 아니라 무시합니다.')
@@ -365,10 +372,13 @@ def _report_context(participant):
 
 
 # ---------------------------------------------------------------------------
-# 휴대폰: QR 시작 -> 개인 페이지
+# 휴대폰: QR 시작 -> 구글 폼 (설문을 받은 뒤에는 개인 페이지)
 # ---------------------------------------------------------------------------
 def _participant_from_cookie(request):
-    """12시간 안에 이 휴대폰에서 발급한 참가자. QR 을 다시 찍어도 같은 번호로 돌아오게 한다."""
+    """12시간 안에 이 브라우저에서 발급한 참가자. QR 을 다시 찍어도 같은 번호로 돌아오게 한다.
+
+    쿠키라 휴대폰이 아니라 브라우저(앱) 단위다. 다른 스캐너 앱·시크릿 창에서 찍으면 알아보지 못한다.
+    """
     participant = services.get_participant_by_token(request.COOKIES.get(conf.TOKEN_COOKIE_NAME))
     if participant is None:
         return None
@@ -381,17 +391,43 @@ def _participant_from_cookie(request):
 _ISSUE_LIMITED_LINE = '지금은 참가자 번호 발급이 많아 잠시 멈췄습니다. 잠시 후 다시 시도해 주세요.'
 
 
+def _start_destination(participant):
+    """QR 시작 뒤 보낼 주소. 설문 전이면 미리 채운 구글 폼, 그 밖에는 개인 페이지.
+
+    - 설문을 이미 받았으면 개인 페이지(접수 확인·동의 없음·리포트). 같은 번호·확인 코드로 폼을 다시 열어
+      주면 다시 제출한 응답이 앞의 응답을 덮어쓰고 만들어 둔 리포트도 지워진다(services.apply_survey).
+    - 폼 주소는 survey_redirect 와 같은 build_form_url 로 만든다. 조건(BOOTH_FORM_URL 이 http(s))과
+      미리 채우는 값이 설문하기 버튼과 갈라지지 않게 하기 위해서다. 주소에는 번호·확인 코드만 있고 토큰은 없다.
+    - 폼 주소가 없거나 잘못됐으면 503 대신 개인 페이지로 보낸다. 번호는 이미 발급됐으니 체험자가 번호를
+      보고, 스태프가 설정을 고친 뒤 그 페이지의 설문하기로 이어갈 수 있다.
+    - 번호 문항(BOOTH_FORM_NUMBER_ENTRY)이 없어도 개인 페이지로 보낸다. 설문하기 버튼은 번호가 크게 보이는
+      화면에서 누르므로 직접 적을 수 있지만, QR 로 폼을 바로 열면 체험자는 번호를 볼 곳이 없어 번호 없는
+      제출이 400 으로 거부되고 Apps Script 도 다시 보내지 않는다(설정 체크 booth.W005 도 알린다).
+    """
+    personal_url = reverse('booth:personal', kwargs={'token': participant.token})
+    if participant.has_survey:
+        return personal_url
+    if not conf.form_number_entry():
+        logger.warning('[booth] BOOTH_FORM_NUMBER_ENTRY 가 비어 있어 인쇄 QR 이 폼 대신 개인 페이지를 엽니다.')
+        return personal_url
+    return build_form_url(participant) or personal_url
+
+
 @booth_page(methods=SAFE_METHODS)
 def start(request):
-    """GET /booth/start/ : 인쇄된 QR 의 목적지. 번호를 발급(또는 재사용)하고 개인 페이지로 보낸다.
+    """GET /booth/start/ : 인쇄된 QR 의 목적지. 번호를 발급(또는 재사용)하고 구글 폼으로 바로 보낸다.
 
+    탭 한 번을 줄이려고 개인 페이지를 거치지 않는다. 어디로 보낼지는 _start_destination 이 정한다.
     ?new=1 은 기존 쿠키를 무시하고 새 번호를 발급한다(가족이 휴대폰 한 대를 같이 쓰는 경우).
     쿠키는 새로 발급할 때만 심는다. 재사용 때 다시 심으면 만료가 계속 연장되어 12시간 제한이 무의미해진다.
+    구글로 가는 302 에 심어도 브라우저는 쿠키를 저장하므로, 같은 브라우저로 다시 찍으면 같은 번호로 돌아온다.
+    Referer 는 booth_page 가 붙이는 no-referrer 로 막는다. 개인 페이지(토큰 URL)의 '새 번호 받기'에서
+    출발한 요청도 이 302 를 거쳐 구글로 가기 때문이다.
     """
     force_new = request.GET.get('new') == '1'
     participant = None if force_new else _participant_from_cookie(request)
     if participant is not None:
-        return HttpResponseRedirect(reverse('booth:personal', kwargs={'token': participant.token}))
+        return HttpResponseRedirect(_start_destination(participant))
 
     try:
         participant = services.issue_participant(Participant.Source.PHONE)
@@ -401,7 +437,7 @@ def start(request):
         logger.error('[booth] 휴대폰 번호 발급 실패 (%s)', type(exc).__name__)
         return _service_unavailable_page(request, ['참가자 번호를 발급하지 못했습니다. QR 코드를 다시 스캔해 주세요.'])
 
-    response = HttpResponseRedirect(reverse('booth:personal', kwargs={'token': participant.token}))
+    response = HttpResponseRedirect(_start_destination(participant))
     response.set_cookie(
         conf.TOKEN_COOKIE_NAME,
         participant.token,

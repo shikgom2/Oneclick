@@ -89,4 +89,13 @@ def booth_deploy_check(app_configs, **kwargs):
             hint='로컬 개발 전용입니다. 운영 backend/.env 에서는 지우세요.',
             id='booth.W004',
         ))
+    if conf.form_url() and not conf.form_number_entry():
+        # 인쇄 QR 이 폼을 바로 열어 휴대폰 체험자는 번호를 볼 화면이 없다. 번호 미리 채우기가 빠지면 조용히
+        # 개인 페이지로 돌아가므로(views_pages._start_destination) 설정 단계에서 알린다.
+        warnings.append(Warning(
+            'BOOTH_FORM_URL 은 있는데 BOOTH_FORM_NUMBER_ENTRY 가 없어 폼에 참가자 번호를 미리 채우지 못합니다.',
+            hint='인쇄 QR 이 폼 대신 개인 페이지를 엽니다(번호 없는 설문은 접수되지 않음). '
+                 '구글 폼 미리 채운 링크의 entry.<숫자> 를 넣으세요.',
+            id='booth.W005',
+        ))
     return warnings

@@ -1,5 +1,5 @@
 # -*- coding:utf-8 -*-
-"""booth 체험자 페이지 테스트: 휴대폰 시작·쿠키, 키오스크, 설문 리다이렉트, 개인 페이지 상태,
+"""booth 체험자 페이지 테스트: 휴대폰 시작(구글 폼 바로 열기)·쿠키, 키오스크, 설문 리다이렉트, 개인 페이지 상태,
 리포트 렌더링(비교표 캡션·이스케이프·푸터), 상태/생성 JSON, 보안 헤더.
 
 반드시 --settings=backend.settings_booth_test 로 실행한다(모든 DB 가 로컬 SQLite).
@@ -26,6 +26,9 @@ Status = Participant.ReportStatus
 
 FORM_URL = 'https://docs.google.com/forms/d/e/FORM_ID/viewform'
 FORM_ENTRY = 'entry.1234567'
+FORM_CODE_ENTRY = 'entry.7654321'
+# urlsplit 이 ValueError 를 내는 설정 오타('[' 만 있음).
+MALFORMED_FORM_URL = 'https://[docs.google.com/forms/d/e/FORM_ID/viewform'
 
 
 class PageTestCase(CleanEnvMixin, TestCase):
@@ -77,16 +80,49 @@ class PageTestCase(CleanEnvMixin, TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 휴대폰 시작 (쿠키)
+# 휴대폰 시작 (쿠키, 구글 폼 바로 열기)
 # ---------------------------------------------------------------------------
 class StartTests(PageTestCase):
+    """인쇄 QR(/booth/start/): 설문 전이면 미리 채운 구글 폼으로 바로, 설문 접수 뒤·폼 미설정이면 개인 페이지로."""
 
-    def test_issues_number_sets_cookie_and_redirects(self):
-        response = self.client.get(reverse('booth:start'))
-        p = Participant.objects.using('booth').get()
-        self.assertEqual(p.source, 'phone')
-        self.assertRedirects(response, self.url('personal', p), fetch_redirect_response=False)
+    def form_env(self, **values):
+        env = dict(BOOTH_FORM_URL=FORM_URL, BOOTH_FORM_NUMBER_ENTRY=FORM_ENTRY, BOOTH_FORM_CODE_ENTRY=FORM_CODE_ENTRY)
+        env.update(values)                                # 폼 설정 하나만 바꾼 경우도 같은 도우미로
+        return booth_env(**env)
+
+    def start(self, query='', client=None, **extra):
+        return (client or self.client).get(reverse('booth:start') + query, **extra)
+
+    def newest(self):
+        return Participant.objects.using('booth').order_by('-number').first()
+
+    def assertOpensForm(self, response, participant):
+        """이 참가자의 번호·확인 코드를 미리 채운 구글 폼으로 바로 보냈는지."""
+        self.assertEqual(response.status_code, 302)
+        location = urlsplit(response['Location'])
+        self.assertEqual('%s://%s%s' % (location.scheme, location.netloc, location.path), FORM_URL)
+        self.assertEqual(parse_qs(location.query), {
+            'usp': ['pp_url'],
+            FORM_ENTRY: [participant.label],
+            FORM_CODE_ENTRY: [services.survey_code(participant)],
+        })
+        self.assertNotIn(participant.token, response['Location'])        # 토큰은 구글로 가지 않는다
         self.assertBoothHeaders(response)
+
+    def assertOpensPersonalPage(self, response, participant):
+        self.assertRedirects(response, self.url('personal', participant), fetch_redirect_response=False)
+        self.assertBoothHeaders(response)
+
+    def test_new_visitor_opens_prefilled_form_and_gets_cookie(self):
+        with self.form_env():
+            response = self.start()
+            p = Participant.objects.using('booth').get()
+            survey_location = self.client.get(self.url('survey_redirect', p))['Location']
+        self.assertEqual(p.source, 'phone')
+        self.assertOpensForm(response, p)
+        self.assertEqual(parse_qs(urlsplit(response['Location']).query)[FORM_ENTRY], ['SF-001'])
+        # 개인 페이지의 설문하기가 보내는 주소와 똑같다(같은 build_form_url).
+        self.assertEqual(response['Location'], survey_location)
 
         morsel = response.cookies[conf.TOKEN_COOKIE_NAME]
         self.assertEqual(morsel.value, p.token)
@@ -100,24 +136,130 @@ class StartTests(PageTestCase):
         response = self.client.get(reverse('booth:start'), secure=True)
         self.assertTrue(response.cookies[conf.TOKEN_COOKIE_NAME]['secure'])
 
-    def test_cookie_is_reused(self):
-        first = self.client.get(reverse('booth:start'))
-        second = self.client.get(reverse('booth:start'))      # 테스트 클라이언트가 쿠키를 다시 보낸다
-        self.assertEqual(Participant.objects.using('booth').count(), 1)
+    def test_cookie_reuse_before_survey_opens_same_form_again(self):
+        with self.form_env():
+            first = self.start()
+            second = self.start()                         # 테스트 클라이언트가 쿠키를 다시 보낸다
+        p = Participant.objects.using('booth').get()
+        self.assertOpensForm(second, p)
         self.assertEqual(second['Location'], first['Location'])
         self.assertNotIn(conf.TOKEN_COOKIE_NAME, second.cookies)   # 재사용 때는 만료를 늘리지 않는다
 
-    def test_new_param_issues_new_number_and_replaces_cookie(self):
-        self.client.get(reverse('booth:start'))
-        response = self.client.get(reverse('booth:start') + '?new=1')
+    def test_cookie_reuse_after_survey_opens_personal_page(self):
+        # 폼을 다시 열어 주면 같은 번호·확인 코드로 다시 제출해 앞의 응답을 덮어쓸 수 있다.
+        with self.form_env():
+            self.start()
+            p = self.with_survey(Participant.objects.using('booth').get())
+            response = self.start()
+        self.assertOpensPersonalPage(response, p)
+        self.assertNotIn(conf.TOKEN_COOKIE_NAME, response.cookies)
+        self.assertEqual(Participant.objects.using('booth').count(), 1)
+
+    def test_rescan_in_any_state_after_survey_opens_personal_page(self):
+        participants = [self.with_survey(self.issue(), consent='동의하지 않습니다'), self.ready(), self.done()]
+        for p in participants:
+            client = Client()
+            client.cookies[conf.TOKEN_COOKIE_NAME] = p.token
+            with self.form_env():
+                response = self.start(client=client)
+            self.assertOpensPersonalPage(response, p)
+            self.assertNotIn(conf.TOKEN_COOKIE_NAME, response.cookies)
+        self.assertEqual(Participant.objects.using('booth').count(), len(participants))
+
+    def test_new_param_issues_new_number_opens_its_form_and_replaces_cookie(self):
+        with self.form_env():
+            self.start()
+            first = self.with_survey(Participant.objects.using('booth').get())    # 앞사람이 제출한 뒤 '새 번호 받기'
+            response = self.start('?new=1')
+            newest = self.newest()
+            again = self.start()                          # 이후 재방문은 새 번호의 폼으로
         self.assertEqual(Participant.objects.using('booth').count(), 2)
-        newest = Participant.objects.using('booth').order_by('-number').first()
         self.assertEqual(newest.number, 2)
-        self.assertRedirects(response, self.url('personal', newest), fetch_redirect_response=False)
+        self.assertNotEqual(newest.pk, first.pk)
+        self.assertOpensForm(response, newest)
         self.assertEqual(response.cookies[conf.TOKEN_COOKIE_NAME].value, newest.token)
-        # 이후 재방문은 새 번호로
-        again = self.client.get(reverse('booth:start'))
-        self.assertEqual(again['Location'], self.url('personal', newest))
+        self.assertOpensForm(again, newest)
+
+    def test_unset_or_invalid_form_url_opens_personal_page(self):
+        # 폼 주소가 없거나 잘못되면 503·500 이 아니라 번호가 보이는 개인 페이지로. 발급·쿠키는 그대로다.
+        # 마지막 값은 urlsplit 이 ValueError 를 내는 오타다.
+        values = (None, '', 'javascript:alert(1)', 'docs.google.com/forms/d/e/FORM_ID/viewform', MALFORMED_FORM_URL)
+        for value in values:
+            with booth_env(BOOTH_FORM_URL=value, BOOTH_FORM_NUMBER_ENTRY=FORM_ENTRY,
+                           BOOTH_FORM_CODE_ENTRY=FORM_CODE_ENTRY):
+                with self.assertLogs('booth.views_pages', 'WARNING') if value else _noop():
+                    response = self.start('?new=1')
+            p = self.newest()
+            self.assertOpensPersonalPage(response, p)
+            self.assertEqual(response.cookies[conf.TOKEN_COOKIE_NAME].value, p.token)
+        self.assertEqual(Participant.objects.using('booth').count(), len(values))
+
+    def test_malformed_form_url_does_not_500_or_pile_up_numbers(self):
+        # 500 이면 쿠키를 못 심어 같은 사람이 다시 찍을 때마다 번호가 새로 발급되고 발급 상한도 줄어든다.
+        with self.form_env(BOOTH_FORM_URL=MALFORMED_FORM_URL), self.assertLogs('booth.views_pages', 'WARNING'):
+            first = self.start()
+            second = self.start()
+        p = Participant.objects.using('booth').get()
+        self.assertOpensPersonalPage(first, p)
+        self.assertEqual(first.cookies[conf.TOKEN_COOKIE_NAME].value, p.token)
+        self.assertOpensPersonalPage(second, p)
+
+    def test_missing_number_entry_opens_personal_page_where_number_is_visible(self):
+        # QR 로 폼을 바로 열면 번호를 볼 곳이 없어 번호 없는 제출이 거부된다. 번호가 보이는 개인 페이지로 보낸다.
+        for value in (None, '', '   '):
+            with self.form_env(BOOTH_FORM_NUMBER_ENTRY=value), self.assertLogs('booth.views_pages', 'WARNING'):
+                issued = self.start('?new=1')
+                reused = self.start()
+            p = self.newest()
+            self.assertOpensPersonalPage(issued, p)
+            self.assertEqual(issued.cookies[conf.TOKEN_COOKIE_NAME].value, p.token)
+            self.assertOpensPersonalPage(reused, p)
+        self.assertEqual(Participant.objects.using('booth').count(), 3)
+        # 그 페이지에는 번호가 크게 보이고, 설문하기는 지금처럼 폼을 연다(번호는 화면을 보고 적는다).
+        with self.form_env(BOOTH_FORM_NUMBER_ENTRY=None), self.assertLogs('booth.views_pages', 'WARNING'):
+            page = self.client.get(self.url('personal', p))
+            survey_response = self.client.get(self.url('survey_redirect', p))
+        self.assertContains(page, p.label)
+        self.assertTrue(survey_response['Location'].startswith(FORM_URL + '?'), survey_response['Location'])
+        self.assertNotIn(FORM_ENTRY, survey_response['Location'])
+
+    def test_security_headers_on_every_start_redirect(self):
+        # 구글로 가는 302 의 no-referrer 가 다음 요청의 Referer 를 막는다. 개인 페이지(토큰 URL)의
+        # '새 번호 받기'에서 출발한 요청도 이 302 를 거친다.
+        personal = self.url('personal', self.issue())
+        with self.form_env():
+            new_from_personal = self.start('?new=1', HTTP_REFERER='https://testserver' + personal)
+            reused = self.start()
+            self.with_survey(self.newest())
+            surveyed = self.start()
+        with self.form_env(BOOTH_ALLOW_INSECURE=None):   # 운영과 같이 https 로만
+            over_https = self.start('?new=1', secure=True)
+        with booth_env():
+            no_form = self.start('?new=1')
+        for response in (new_from_personal, reused, over_https):
+            self.assertTrue(response['Location'].startswith(FORM_URL + '?'), response['Location'])
+        for response in (new_from_personal, reused, surveyed, over_https, no_form):
+            self.assertEqual(response.status_code, 302)
+            self.assertBoothHeaders(response)
+        for p in Participant.objects.using('booth').all():
+            for response in (new_from_personal, reused, over_https):
+                self.assertNotIn(p.token, response['Location'])
+
+    def test_issue_limit_is_still_503_and_reuse_still_opens_form(self):
+        with self.form_env(BOOTH_MAX_ISSUE_PER_HOUR='1'):
+            first = self.start()
+            p = Participant.objects.using('booth').get()
+            with self.assertLogs('booth.services', 'WARNING'):
+                limited = self.start('?new=1')
+            reused = self.start()                         # 재사용은 발급이 아니라 상한과 무관하다
+        self.assertOpensForm(first, p)
+        self.assertEqual(limited.status_code, 503)
+        self.assertContains(limited, '발급이 많아', status_code=503)
+        self.assertNotIn(conf.TOKEN_COOKIE_NAME, limited.cookies)
+        self.assertNotIn('Location', limited)
+        self.assertBoothHeaders(limited)
+        self.assertOpensForm(reused, p)
+        self.assertEqual(Participant.objects.using('booth').count(), 1)
 
     def test_cookie_older_than_12_hours_is_not_reused(self):
         self.client.get(reverse('booth:start'))
@@ -134,7 +276,8 @@ class StartTests(PageTestCase):
         self.assertEqual(response.cookies[conf.TOKEN_COOKIE_NAME].value, p.token)
 
     def test_issue_failure_shows_korean_503(self):
-        with mock.patch('booth.services.issue_participant', side_effect=OperationalError('database is locked')):
+        with self.form_env(), \
+                mock.patch('booth.services.issue_participant', side_effect=OperationalError('database is locked')):
             with self.assertLogs('booth.views_pages', 'ERROR'):
                 response = self.client.get(reverse('booth:start'))
         self.assertEqual(response.status_code, 503)
@@ -234,6 +377,12 @@ class KioskTests(PageTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertContains(response, '설문 주소', status_code=503)
         self.assertBoothHeaders(response)
+        # 해석되지 않는 주소 오타도 500 이 아니라 같은 안내다.
+        with booth_env(BOOTH_FORM_URL=MALFORMED_FORM_URL, BOOTH_FORM_NUMBER_ENTRY=FORM_ENTRY), \
+                self.assertLogs('booth.views_pages', 'WARNING'):
+            response = self.client.get(self.kiosk_url('kiosk_participant', p))
+        self.assertContains(response, '설문 주소', status_code=503)
+        self.assertBoothHeaders(response)
 
     def test_participant_unknown_token_is_404(self):
         response = self.client.get(reverse('booth:kiosk_participant', kwargs={'token': 'nope'}))
@@ -283,7 +432,7 @@ class SurveyRedirectTests(PageTestCase):
 
     def test_unset_or_non_http_form_url_is_503(self):
         p = self.issue()
-        for value in ('', 'javascript:alert(1)'):
+        for value in ('', 'javascript:alert(1)', MALFORMED_FORM_URL):
             with booth_env(BOOTH_FORM_URL=value, BOOTH_FORM_NUMBER_ENTRY=FORM_ENTRY):
                 with self.assertLogs('booth.views_pages', 'WARNING') if value else _noop():
                     response = self.client.get(self.url('survey_redirect', p))

@@ -453,8 +453,22 @@ class DeployCheckTests(CleanEnvMixin, SimpleTestCase):
 
     def test_clean_production_like_configuration_has_no_warnings(self):
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f',
-                       BOOTH_PUBLIC_BASE_URL='https://180.83.245.145'):
+                       BOOTH_PUBLIC_BASE_URL='https://180.83.245.145',
+                       BOOTH_FORM_URL='https://docs.google.com/forms/d/e/X/viewform',
+                       BOOTH_FORM_NUMBER_ENTRY='entry.1'):
             self.assertEqual(self.ids(), set())
+
+    def test_form_url_without_number_entry_warns(self):
+        # 인쇄 QR 이 폼을 바로 열므로 번호 미리 채우기가 없으면 휴대폰 체험자는 번호를 알 수 없다.
+        form_url = 'https://docs.google.com/forms/d/e/X/viewform'
+        with booth_env(BOOTH_FORM_URL=form_url):
+            self.assertIn('booth.W005', self.ids())
+        with booth_env(BOOTH_FORM_URL=form_url, BOOTH_FORM_NUMBER_ENTRY='  '):
+            self.assertIn('booth.W005', self.ids())
+        with booth_env(BOOTH_FORM_URL=form_url, BOOTH_FORM_NUMBER_ENTRY='1234567'):
+            self.assertNotIn('booth.W005', self.ids())
+        with booth_env():                                   # 폼 자체가 없으면 W005 가 아니다
+            self.assertNotIn('booth.W005', self.ids())
 
     def test_each_warning(self):
         inside = str(settings.BASE_DIR / 'booth.sqlite3')
