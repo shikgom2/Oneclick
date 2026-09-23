@@ -107,14 +107,14 @@ class ConfTests(SimpleTestCase):
             self.assertEqual(conf.pending_window_hours(), 12)
             self.assertEqual(conf.public_base_url(), '')
             self.assertEqual(conf.report_model(), 'claude-opus-5')
-            # 자세한 리포트(설문 지표·측정값 인용): effort high, 마감은 워커 예산의 상한(200)까지.
-            self.assertEqual(conf.report_effort(), 'high')
-            self.assertEqual(conf.report_max_tokens(), 16000)
-            self.assertEqual(conf.report_deadline_sec(), 200)
-            self.assertEqual(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
-        with booth_env(BOOTH_REPORT_EFFORT='medium', BOOTH_REPORT_DEADLINE_SEC='150'):
+            # 리포트를 짧게 되돌린 뒤의 기본값.
             self.assertEqual(conf.report_effort(), 'medium')
+            self.assertEqual(conf.report_max_tokens(), 16000)
             self.assertEqual(conf.report_deadline_sec(), 150)
+            self.assertLess(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
+        with booth_env(BOOTH_REPORT_EFFORT='high', BOOTH_REPORT_DEADLINE_SEC='200'):
+            self.assertEqual(conf.report_effort(), 'high')
+            self.assertEqual(conf.report_deadline_sec(), 200)
 
     def test_env_read_at_call_time(self):
         with booth_env(BOOTH_NUMBER_PREFIX='AB', BOOTH_RETENTION_DAYS='7',
@@ -330,37 +330,39 @@ class ReportSchemaTests(SimpleTestCase):
         self._walk(REPORT_SCHEMA)
         # 속성 순서 = 화면 순서(모델이 앞에서 인용한 값을 뒤에서 이어 쓰기 쉽게).
         self.assertEqual(list(REPORT_SCHEMA['properties']),
-                         ['headline', 'sleep_analysis', 'survey_insights', 'autonomic_analysis', 'indices',
-                          'tips', 'caveats', 'closing'])
+                         ['headline', 'survey_insights', 'autonomic_analysis', 'indices', 'tips', 'closing'])
         key_schema = REPORT_SCHEMA['properties']['indices']['items']['properties']['key']
         self.assertEqual(key_schema['enum'], list(INDEX_KEYS))
         self.assertEqual(list(REPORT_SCHEMA['properties']['indices']['items']['properties']),
-                         ['key', 'meaning', 'reading', 'personal_note'])
-        self.assertEqual(REPORT_SCHEMA['properties']['caveats']['minItems'], 1)
+                         ['key', 'meaning', 'reading'])
+        self.assertEqual(REPORT_SCHEMA['properties']['tips']['minItems'], 1)
 
     def test_example_report_validates(self):
         self.assertEqual(validate_report(EXAMPLE_REPORT), EXAMPLE_REPORT)
         self.assertEqual(validate_report(EXAMPLE_REPORT, strict=True), EXAMPLE_REPORT)
         self.assertEqual({item['key'] for item in EXAMPLE_REPORT['indices']}, set(INDEX_KEYS))
-        self.assertGreaterEqual(len(EXAMPLE_REPORT['caveats']), 3)
-        self.assertGreaterEqual(len(EXAMPLE_REPORT['tips']), 5)
+        self.assertGreaterEqual(len(EXAMPLE_REPORT['tips']), 3)
 
     def test_old_shape_report_is_tolerated_leniently_but_not_strictly(self):
-        # 새 칸(sleep_analysis, autonomic_analysis, personal_note, caveats)이 생기기 전에 저장된 리포트.
+        # 측정값 풀이가 생기기 전에 저장된 리포트는 그 칸만 비워서 그린다.
         import copy
         old = copy.deepcopy(EXAMPLE_REPORT)
-        for key in ('sleep_analysis', 'autonomic_analysis', 'caveats'):
-            del old[key]
-        for item in old['indices']:
-            del item['personal_note']
+        del old['autonomic_analysis']
         rendered = validate_report(old)
-        self.assertEqual(rendered['sleep_analysis'], '')
         self.assertEqual(rendered['autonomic_analysis'], '')
-        self.assertEqual(rendered['caveats'], [])
-        self.assertEqual([item['personal_note'] for item in rendered['indices']], ['', '', ''])
         self.assertEqual(rendered['tips'], EXAMPLE_REPORT['tips'])
         with self.assertRaises(ReportInvalid):
             validate_report(old, strict=True)
+
+    def test_fields_from_the_long_version_are_dropped(self):
+        # 리포트를 줄이기 전에 저장된 리포트에는 지금 쓰지 않는 칸이 들어 있다. 스키마에 있는 칸만 남긴다.
+        import copy
+        long_one = copy.deepcopy(EXAMPLE_REPORT)
+        long_one['sleep_analysis'] = '긴 수면 상태 풀이'
+        long_one['caveats'] = ['긴 유의점']
+        long_one['indices'][0]['personal_note'] = '긴 개인 풀이'
+        rendered = validate_report(long_one)
+        self.assertEqual(rendered, EXAMPLE_REPORT)
 
     def test_validate_report_rejects_and_strips(self):
         import copy

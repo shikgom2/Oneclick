@@ -190,7 +190,7 @@ class TimingInvariantTests(SimpleTestCase):
     def test_deadline_above_max_falls_back_to_default(self):
         with booth_env(BOOTH_REPORT_DEADLINE_SEC=str(conf.REPORT_DEADLINE_MAX_SEC + 1)):
             with self.assertLogs('booth.conf', 'WARNING'):
-                self.assertEqual(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
+                self.assertEqual(conf.report_deadline_sec(), 150)     # 상한을 넘으면 기본값으로
         with booth_env(BOOTH_REPORT_DEADLINE_SEC='150'):
             self.assertEqual(conf.report_deadline_sec(), 150)
         # 기본 마감이 상한과 같아도 워커 수명(마감 + 읽기 + 연결) < 멈춤 판정은 그대로다.
@@ -511,10 +511,11 @@ class PromptRuleTests(SimpleTestCase):
         self.assertIn('Sleep Index 22', report._INDEX_GUIDE['default_values'])
         # 체험 전 값은 인용해도 되지만(60초 측정임을 밝히고), 체험 후 값·전후 방향·자극 효과는 금지.
         for rule in ('합쇼체', '지시가 아니다', '체험 전 약 60초 동안 손가락 링으로 측정한 값', '체험 후 값',
-                     '높아졌다', '효과가 있었다는 말은 어떤 칸에도 쓰지 않는다', '정상/비정상', 'caveats'):
+                     '높아졌다', '효과가 있었다는 말은 어떤 칸에도 쓰지 않는다', '정상/비정상'):
             self.assertIn(rule, report.SYSTEM_PROMPT)
-        for length in ('sleep_analysis: 5~8문장', 'autonomic_analysis: 5~8문장', 'tips: 5~6개', 'caveats: 3~4개',
-                       'personal_note 2~3문장'):
+        # 분량은 읽기 힘들다는 지적을 받아 예전 수준으로 되돌렸다. 측정값 풀이만 새로 남겼다.
+        for length in ('headline.detail: 2~3문장', 'autonomic_analysis: 3~4문장', 'tips: 3~5개',
+                       'meaning 1~2문장'):
             self.assertIn(length, report.SYSTEM_PROMPT)
 
     def test_index_guide_bands_match_measurement_table(self):
@@ -542,11 +543,7 @@ class PromptRuleTests(SimpleTestCase):
         self.assertIn('체험 전 약 60초', EXAMPLE_REPORT['autonomic_analysis'])
         for banned in ('체험 후', '높아졌', '낮아졌', '좋아졌', '개선되었', '안정되었', '자극 덕분', '효과가 있'):
             self.assertNotIn(banned, dumped, banned)
-        for item in EXAMPLE_REPORT['indices']:
-            self.assertIn('체험자님의 체험 전', item['personal_note'])
-        caveats = ' '.join(EXAMPLE_REPORT['caveats'])
-        for topic in ('60초', '추정', '시연용 보정', '진단'):
-            self.assertIn(topic, caveats)
+        # 유의점은 AI 가 아니라 화면의 고정 문구가 담당한다(리포트를 짧게 줄이면서 옮겼다).
 
 
 class StrictReportValidationTests(SimpleTestCase):
@@ -565,14 +562,9 @@ class StrictReportValidationTests(SimpleTestCase):
             lambda d: d.update(closing=''),
             lambda d: d['survey_insights'][0].update(body=' '),
             lambda d: d.update(tips=[]),
-            # 새 칸도 생성 시에는 필수이고 비어 있으면 안 된다.
-            lambda d: d.update(sleep_analysis=''),
+            # 측정값 풀이도 생성 시에는 필수이고 비어 있으면 안 된다.
+            lambda d: d.update(autonomic_analysis=''),
             lambda d: d.pop('autonomic_analysis'),
-            lambda d: d.update(caveats=[]),
-            lambda d: d['caveats'].append(' '),
-            lambda d: d.pop('caveats'),
-            lambda d: d['indices'][1].update(personal_note='  '),
-            lambda d: d['indices'][2].pop('personal_note'),
         ]
         for mutate in cases:
             with self.assertRaises(ReportInvalid):
@@ -580,11 +572,10 @@ class StrictReportValidationTests(SimpleTestCase):
 
     def test_lenient_render_dedupes_reorders_and_drops_blank_tips(self):
         data = self.variant(lambda d: (d['indices'].reverse(), d['indices'].append(copy.deepcopy(d['indices'][0])),
-                                       d['tips'].append('  '), d['caveats'].append('')))
+                                       d['tips'].append('  ')))
         result = validate_report(data)
         self.assertEqual([item['key'] for item in result['indices']], list(INDEX_KEYS))
         self.assertEqual(result['tips'], EXAMPLE_REPORT['tips'])
-        self.assertEqual(result['caveats'], EXAMPLE_REPORT['caveats'])
 
     def test_interpret_message_uses_strict_validation(self):
         data = self.variant(lambda d: d['indices'].append(copy.deepcopy(d['indices'][0])))

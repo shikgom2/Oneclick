@@ -567,12 +567,7 @@ class ReportRenderingTests(PageTestCase):
         for label, gloss in (('Sleep Index', '이완 지표'), ('Autonomic Balance', '자율신경 균형'),
                              ('Stress/Recovery Index', '회복 지표')):
             self.assertContains(response, '<h3>%s <span class="gloss-inline">(%s)</span></h3>' % (label, gloss))
-        for item in EXAMPLE_REPORT['indices']:
-            self.assertContains(response, item['personal_note'])
-        self.assertContains(response, EXAMPLE_REPORT['sleep_analysis'])
         self.assertContains(response, EXAMPLE_REPORT['autonomic_analysis'])
-        for caveat in EXAMPLE_REPORT['caveats']:
-            self.assertContains(response, caveat)
 
         # 비교표: 서버가 displayed 값으로 만든다. 캡션이 숫자 바로 위(표 caption)에 있다.
         self.assertInHTML('<caption>체험 화면 표시값 (시연용 보정 포함)</caption>', content)
@@ -605,9 +600,9 @@ class ReportRenderingTests(PageTestCase):
                           '<td class="verdict" data-th="해석">긴 편</td></tr>', content)
         self.assertContains(response, '간이 수면 점수: 계산 불가 (4개 항목 중 1개만 계산됨)')
 
-        # 화면 순서: 요약 -> 설문 지표 표 -> 수면 풀이 -> 생활 습관 -> 체험 전 측정값 -> 측정 풀이 -> 전·후 표 ->
+        # 화면 순서: 요약 -> 설문 지표 표 -> 생활 습관 -> 체험 전 측정값 -> 측정 풀이 -> 전·후 표 ->
         # 지표 이해 -> 방법 -> 유의점 -> 마무리 -> 인쇄 버튼 -> 푸터
-        order = ['님의 체험 리포트', '설문으로 계산한 수면 지표', '수면 상태 풀이', '설문으로 살펴본 생활 습관',
+        order = ['님의 체험 리포트', '설문으로 계산한 수면 지표', '설문으로 살펴본 생활 습관',
                  '<h2>체험 전 측정값</h2>', '체험 전 측정값 풀이', '체험 전·후 값', '지표 이해하기',
                  '일상에서 해볼 수 있는 방법', '이 리포트를 읽을 때 유의점', EXAMPLE_REPORT['closing'],
                  'id="print-btn"', 'class="report-footer"']
@@ -680,14 +675,15 @@ class ReportRenderingTests(PageTestCase):
     def test_old_shape_report_still_renders(self):
         # 새 칸이 없던 때 저장된 리포트: 그 칸의 섹션만 빠지고 나머지(표 포함)는 그대로 그린다.
         old = copy.deepcopy(EXAMPLE_REPORT)
-        for key in ('sleep_analysis', 'autonomic_analysis', 'caveats'):
-            del old[key]
-        for item in old['indices']:
-            del item['personal_note']
+        del old['autonomic_analysis']
+        # 리포트를 줄이기 전 칸이 들어 있어도 스키마에 없으므로 화면에 새지 않는다.
+        old['sleep_analysis'] = '지금은 쓰지 않는 칸입니다.'
+        old['indices'][0]['personal_note'] = '지금은 쓰지 않는 칸입니다.'
         p = self.done(report=old)
         response = self.get(p)
         content = self.html_text(response)
         self.assertContains(response, 'data-state="done"')
+        self.assertNotIn('지금은 쓰지 않는 칸입니다.', content)
         self.assertNotIn('수면 상태 풀이', content)
         self.assertNotIn('체험 전 측정값 풀이', content)
         self.assertNotIn('class="ai personal"', content)
@@ -755,10 +751,7 @@ class ReportRenderingTests(PageTestCase):
         evil['indices'][0]['reading'] = '<iframe src="https://evil.example"></iframe>'
         evil['tips'][0] = '<a href="javascript:alert(3)">tip</a>'
         evil['closing'] = '</p><script>alert(4)</script>'
-        evil['sleep_analysis'] = '<script>alert(5)</script>'
         evil['autonomic_analysis'] = '<img src=y onerror=alert(6)>'
-        evil['indices'][1]['personal_note'] = '<svg onload=alert(7)>'
-        evil['caveats'][0] = '</li><script>alert(8)</script>'
         p = self.done(report=evil)
         content = self.html_text(self.get(p))
         for raw in ('<script>alert(1)</script>', '<img src=x', '<b>bold</b>', '<iframe src="https://evil.example"',

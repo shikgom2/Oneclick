@@ -657,7 +657,7 @@ class SdkWireTests(ReportDbTestCase):
         self.assertTrue(body['stream'])
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(body['thinking'], {'type': 'adaptive'})
-        self.assertEqual(body['output_config']['effort'], 'high')
+        self.assertEqual(body['output_config']['effort'], 'medium')
         self.assertEqual(body['output_config']['format'], {'type': 'json_schema', 'schema': REPORT_SCHEMA})
         self.assertIn('server-side-fallback-2026-07-01', captured['headers'].get('anthropic-beta', ''))
         raw = json.dumps(body, ensure_ascii=False)

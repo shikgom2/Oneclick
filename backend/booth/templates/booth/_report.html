@@ -29,13 +29,6 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
   </section>
   {% endif %}
 
-  {% if report.sleep_analysis %}
-  <section class="card">
-    <h2>수면 상태 풀이</h2>
-    <p class="ai">{{ report.sleep_analysis }}</p>
-  </section>
-  {% endif %}
-
   <section class="card">
     <h2>설문으로 살펴본 생활 습관</h2>
     {% for item in report.survey_insights %}
@@ -96,7 +89,6 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
       <h3>{{ item.label }}{% if item.gloss %} <span class="gloss-inline">({{ item.gloss }})</span>{% endif %}</h3>
       <p class="ai">{{ item.meaning }}</p>
       <p class="ai muted">{{ item.reading }}</p>
-      {% if item.personal_note %}<p class="ai personal">{{ item.personal_note }}</p>{% endif %}
       {% if item.own %}
       <p class="own-values"><span class="own-label">내 값</span> 체험 전 <strong>{{ item.own.before.value }}</strong>{% if item.own.before.band %} ({{ item.own.before.band }}){% endif %} · 체험 후 <strong>{{ item.own.after.value }}</strong>{% if item.own.after.band %} ({{ item.own.after.band }}){% endif %}</p>
       {% endif %}
@@ -116,7 +108,6 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
   <section class="card">
     <h2>이 리포트를 읽을 때 유의점</h2>
     <ul class="caveats">
-      {% for item in report.caveats %}<li class="ai">{{ item }}</li>{% endfor %}
       <li>이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.</li>
     </ul>
   </section>
