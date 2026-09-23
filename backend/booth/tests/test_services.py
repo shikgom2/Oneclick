@@ -107,8 +107,13 @@ class ConfTests(SimpleTestCase):
             self.assertEqual(conf.pending_window_hours(), 12)
             self.assertEqual(conf.public_base_url(), '')
             self.assertEqual(conf.report_model(), 'claude-opus-5')
-            self.assertEqual(conf.report_effort(), 'medium')
+            # 자세한 리포트(설문 지표·측정값 인용): effort high, 마감은 워커 예산의 상한(200)까지.
+            self.assertEqual(conf.report_effort(), 'high')
             self.assertEqual(conf.report_max_tokens(), 16000)
+            self.assertEqual(conf.report_deadline_sec(), 200)
+            self.assertEqual(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
+        with booth_env(BOOTH_REPORT_EFFORT='medium', BOOTH_REPORT_DEADLINE_SEC='150'):
+            self.assertEqual(conf.report_effort(), 'medium')
             self.assertEqual(conf.report_deadline_sec(), 150)
 
     def test_env_read_at_call_time(self):
@@ -185,6 +190,16 @@ class LabelAndParseTests(CleanEnvMixin, SimpleTestCase):
         result = services.survey_answers_for_ai(survey())
         self.assertEqual(result, {'평소 잠들기까지 걸리는 시간': '30분 이상'})
         self.assertEqual(services.survey_answers_for_ai(None), {})
+
+    def test_survey_answers_for_ai_strips_the_birth_date_question(self):
+        # RMSSD 참고값에 필요한 것은 나이대뿐이다. 생년월일 자체는 AI 로 보내지 않는다
+        # (나이대 이름은 measurement_metrics 가 pre_measurement 에 따로 넣는다).
+        for title in ('생년월일', '10. 생년월일', '출생 연도', '만 나이', '연령대'):
+            answers = dict(survey())
+            answers[title] = '1965-03-05'
+            result = services.survey_answers_for_ai(answers)
+            self.assertNotIn(title, result, title)
+            self.assertEqual(result, {'평소 잠들기까지 걸리는 시간': '30분 이상'}, title)
 
     def test_normalize_answers(self):
         cleaned = services.normalize_answers({'a': None, 'b': 3, 'c': ['x', None, 1], '  ': 'skip'})
@@ -313,14 +328,39 @@ class ReportSchemaTests(SimpleTestCase):
 
     def test_schema_is_structured_output_compatible(self):
         self._walk(REPORT_SCHEMA)
-        self.assertEqual(set(REPORT_SCHEMA['properties']),
-                         {'headline', 'survey_insights', 'indices', 'tips', 'closing'})
+        # 속성 순서 = 화면 순서(모델이 앞에서 인용한 값을 뒤에서 이어 쓰기 쉽게).
+        self.assertEqual(list(REPORT_SCHEMA['properties']),
+                         ['headline', 'sleep_analysis', 'survey_insights', 'autonomic_analysis', 'indices',
+                          'tips', 'caveats', 'closing'])
         key_schema = REPORT_SCHEMA['properties']['indices']['items']['properties']['key']
         self.assertEqual(key_schema['enum'], list(INDEX_KEYS))
+        self.assertEqual(list(REPORT_SCHEMA['properties']['indices']['items']['properties']),
+                         ['key', 'meaning', 'reading', 'personal_note'])
+        self.assertEqual(REPORT_SCHEMA['properties']['caveats']['minItems'], 1)
 
     def test_example_report_validates(self):
         self.assertEqual(validate_report(EXAMPLE_REPORT), EXAMPLE_REPORT)
+        self.assertEqual(validate_report(EXAMPLE_REPORT, strict=True), EXAMPLE_REPORT)
         self.assertEqual({item['key'] for item in EXAMPLE_REPORT['indices']}, set(INDEX_KEYS))
+        self.assertGreaterEqual(len(EXAMPLE_REPORT['caveats']), 3)
+        self.assertGreaterEqual(len(EXAMPLE_REPORT['tips']), 5)
+
+    def test_old_shape_report_is_tolerated_leniently_but_not_strictly(self):
+        # 새 칸(sleep_analysis, autonomic_analysis, personal_note, caveats)이 생기기 전에 저장된 리포트.
+        import copy
+        old = copy.deepcopy(EXAMPLE_REPORT)
+        for key in ('sleep_analysis', 'autonomic_analysis', 'caveats'):
+            del old[key]
+        for item in old['indices']:
+            del item['personal_note']
+        rendered = validate_report(old)
+        self.assertEqual(rendered['sleep_analysis'], '')
+        self.assertEqual(rendered['autonomic_analysis'], '')
+        self.assertEqual(rendered['caveats'], [])
+        self.assertEqual([item['personal_note'] for item in rendered['indices']], ['', '', ''])
+        self.assertEqual(rendered['tips'], EXAMPLE_REPORT['tips'])
+        with self.assertRaises(ReportInvalid):
+            validate_report(old, strict=True)
 
     def test_validate_report_rejects_and_strips(self):
         import copy

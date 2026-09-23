@@ -27,6 +27,21 @@ from booth.tests.test_services import CleanEnvMixin, measurement_payload, side, 
 Status = Participant.ReportStatus
 
 REAL_NAME = '홍길동'
+# 테스트 env(CleanEnvMixin)에서는 BOOTH_* 가 비어 마감이 기본값(상한 200초)이다. 마감 시각 계산이 있는 테스트의 기준.
+DEADLINE = conf.REPORT_DEADLINE_MAX_SEC
+
+# 구글 폼의 수면 문항 9개(제목에 번호·공백 변형 포함). 설문 지표(survey_metrics) 가 계산되는 응답.
+SLEEP_SURVEY = {
+    '1. 어젯밤 잠자리에 든 시각': '밤 11시 ~ 12시',
+    '2.  오늘 아침 잠자리에서 나온 시각 ': '아침 7시 ~ 8시',
+    '3) 잠자리에 든 뒤 잠들기까지 걸린 시간': '16 ~ 30분',
+    '4. 실제로 잠든 시간 (총 수면 시간)': '6 ~ 7시간',
+    '5. 밤중에 깬 횟수 (기억나는 만큼)': '2회',
+    '6. 오늘 아침 일어났을 때 개운한 정도': '조금 개운함',
+    '7. 어젯밤 잠에 대한 만족도': '보통',
+    '8. 지금 이 순간, 얼마나 개운한가요?': '약간 졸림',
+    '9. 평소 취침 시각이 얼마나 일정한가요? (최근 한 달 기준)': '대체로 같음',
+}
 
 
 def text_block(text):
@@ -229,14 +244,14 @@ class PayloadTests(ReportDbTestCase):
         self.assertNotIn('홍 길동', dumped)
         self.assertIn('수면', payload['survey_answers']['관심사'])
 
-    def test_displayed_note_without_numbers(self):
+    def test_screen_table_note_without_numbers(self):
         p = self.ready()
-        m = report.build_user_payload(self.reload(p))['measurement']
+        m = report.build_user_payload(self.reload(p))['screen_table']
         self.assertEqual(m['source'], 'displayed')
         self.assertIn('시연용 보정', m['note'])
         self.assertEqual(set(m), {'source', 'note', 'table_rows'})
         self.assertEqual(m['table_rows'], [label for _, label in services.COMPARISON_ROWS])
-        # 측정·화면 숫자는 보내지 않는다(보정된 전·후 방향을 문장에 쓰면 곧 효과 주장이 된다).
+        # 전·후 표의 숫자는 보내지 않는다(보정된 전·후 방향을 문장에 쓰면 곧 효과 주장이 된다).
         dumped = json.dumps(m, ensure_ascii=False)
         for value in ('70', '72', '55', '48', '60', '35.5'):
             self.assertNotIn(value, dumped)
@@ -247,12 +262,82 @@ class PayloadTests(ReportDbTestCase):
                                          after=side(sleep_index=None, heart_rate=None))
         p = self.ready(answers=survey(**{'평소 잠들기까지 걸리는 시간': ''}), measurement=payload_in)
         payload = report.build_user_payload(self.reload(p))
-        self.assertEqual(payload['measurement']['source'], 'raw')
-        self.assertNotIn('시연용', payload['measurement']['note'])
+        self.assertEqual(payload['screen_table']['source'], 'raw')
+        self.assertNotIn('시연용', payload['screen_table']['note'])
         missing = ' / '.join(payload['missing'])
         self.assertIn('설문 응답', missing)
         self.assertIn('Sleep Index 전·후 값', missing)
         self.assertIn('심박수 (bpm) 체험 후 값', missing)
+        self.assertIsNone(payload['pre_measurement']['values']['sleep_index'])
+        self.assertIn('Sleep Index', payload['pre_measurement']['missing'])
+
+    def test_payload_has_pre_values_and_survey_metrics_but_never_after_or_displayed(self):
+        # 체험 전 값은 특징적인 숫자로, 체험 후·화면 표시값은 참고 범위 문구(60~100, 70 이상 등)와 겹치지 않는
+        # 소수로 둔다. 후·표시 숫자는 payload 어디에도 없어야 한다.
+        payload_in = measurement_payload(
+            before=side(heart_rate=73, rmssd_ms=36.3, sdnn_ms=47.7, sleep_index=54.4, autonomic_balance=47.3,
+                        stress_recovery_index=61.1, rr_count=301),
+            after=side(heart_rate=59, rmssd_ms=41.7, sdnn_ms=52.9, sleep_index=63.3, autonomic_balance=57.7,
+                       stress_recovery_index=66.6, rr_count=299),
+            displayed={'before': side(sleep_index=54.4, rmssd_ms=36.3, heart_rate=73),
+                       'after': side(heart_rate=58, rmssd_ms=44.4, sdnn_ms=53.3, sleep_index=71.1,
+                                     autonomic_balance=58.8, stress_recovery_index=77.7, rr_count=298)},
+        )
+        answers = survey(name=REAL_NAME, **SLEEP_SURVEY)
+        del answers['평소 잠들기까지 걸리는 시간']         # 기본 문항이 3번 문항보다 먼저 잠들기까지 문항으로 잡히지 않게
+        p = self.ready(answers=answers, measurement=payload_in)
+        payload = report.build_user_payload(self.reload(p))
+        dumped = json.dumps(payload, ensure_ascii=False)
+
+        pre = payload['pre_measurement']
+        self.assertEqual(pre['values'], {
+            'heart_rate_bpm': 73, 'rmssd_ms': 36.3, 'sdnn_ms': 47.7, 'rr_count': 301,
+            'sleep_index': 54.4, 'autonomic_balance': 47.3, 'stress_recovery_index': 61.1,
+        })
+        self.assertEqual(pre['categories']['heart_rate'], '참고 범위 안')
+        self.assertEqual(pre['categories']['stress_recovery_index'], '중간 (앱 등급 Warning)')
+        self.assertIn('60초', pre['method'])
+        self.assertIn('체험 후 값은 이 자료에 없다', pre['method'])
+        self.assertEqual(pre['missing'], [])
+        for value in ('59', '41.7', '52.9', '63.3', '57.7', '66.6', '299',        # 체험 후 원 측정값
+                      '58', '44.4', '53.3', '71.1', '58.8', '77.7', '298'):      # 화면 표시값(보정 포함)
+            self.assertNotIn(value, dumped, value)
+        # measurement 의 after/displayed 객체 자체가 없다(screen_table.source 의 낱말 'displayed' 는 출처 표시일 뿐).
+        self.assertNotIn('"displayed":', dumped)
+        self.assertNotIn('"after":', dumped)
+        self.assertEqual(payload['screen_table']['source'], 'displayed')
+
+        metrics = payload['survey_metrics']
+        self.assertEqual((metrics['bedtime'], metrics['wake_time'], metrics['time_in_bed_hours']), ('23:30', '07:30', 8.0))
+        self.assertEqual((metrics['total_sleep_hours'], metrics['sleep_efficiency_percent']), (6.5, 81.2))
+        self.assertEqual(metrics['sleep_latency_minutes_max'], 30)
+        self.assertEqual(metrics['awakenings'], 2)
+        self.assertEqual(metrics['components'], {'latency': 1, 'duration': 1, 'efficiency': 1, 'awakenings': 2})
+        self.assertEqual(metrics['simple_score']['score'], 5)
+        self.assertEqual(metrics['simple_score']['band'], '보통')
+        self.assertEqual(metrics['self_ratings']['alertness'], '약간 졸림')
+        self.assertIn('추정', metrics['note'])
+        self.assertEqual(set(payload), {'survey_answers', 'survey_metrics', 'pre_measurement', 'screen_table',
+                                        'index_guide', 'missing'})
+        self.assert_no_identifiers(dumped, p)
+
+    def test_survey_metrics_answers_are_scrubbed_too(self):
+        # 지표 payload 의 answers 에는 응답 문구가 다시 들어간다. 신원 정보를 지운 뒤 계산해야 한다.
+        answers = survey(name=REAL_NAME, **SLEEP_SURVEY)
+        answers['1. 어젯밤 잠자리에 든 시각'] = '밤 11시 ~ 12시 (%s 기준)' % REAL_NAME
+        p = self.ready(answers=answers)
+        payload = report.build_user_payload(self.reload(p))
+        self.assertEqual(payload['survey_metrics']['answers']['bedtime'], '밤 11시 ~ 12시 (○○○ 기준)')
+        self.assertEqual(payload['survey_metrics']['bedtime'], '23:30')
+        self.assert_no_identifiers(json.dumps(payload, ensure_ascii=False), p)
+
+    def test_missing_pre_measurement_is_listed(self):
+        empty = {key: None for key in services.SIDE_FIELDS}
+        p = self.ready(measurement=measurement_payload(before=empty, displayed=None))
+        payload = report.build_user_payload(self.reload(p))
+        self.assertIn('체험 전 측정값(심박수·RMSSD)', payload['missing'])
+        self.assertEqual(len(payload['pre_measurement']['missing']), 7)
+        self.assertEqual(payload['pre_measurement']['categories']['heart_rate'], '링 접촉 부족으로 계산 불가')
 
     def test_request_shape(self):
         with mock.patch.dict(os.environ, {'BOOTH_REPORT_MODEL': 'claude-test-model',
@@ -479,9 +564,9 @@ class CallClaudeTests(CleanEnvMixin, SimpleTestCase):
         events = [SimpleNamespace(type='message_start'), SimpleNamespace(type='content_block_delta'),
                   SimpleNamespace(type='message_stop')]
         stream = FakeStream(events=events, message=fake_message())
-        # 시작 0 -> 마감 150. 타이머 계산 0, 첫 이벤트 10, 둘째 이벤트 151(마감 초과)
+        # 시작 0 -> 마감 DEADLINE. 타이머 계산 0, 첫 이벤트 10, 둘째 이벤트 DEADLINE+1(마감 초과)
         with mock.patch('booth.report.anthropic.Anthropic', return_value=fake_client(stream)), \
-                mock.patch('booth.report.monotonic', Clock(0, 0, 10, 151)):
+                mock.patch('booth.report.monotonic', Clock(0, 0, 10, DEADLINE + 1)):
             with self.assertRaises(report.ReportDeadlineExceeded):
                 report.call_claude('SYS', {})
         self.assertTrue(stream.exited)
@@ -490,14 +575,14 @@ class CallClaudeTests(CleanEnvMixin, SimpleTestCase):
         stream = FakeStream(events=[SimpleNamespace(type='message_start'), SimpleNamespace(type='message_stop')],
                             message=fake_message())
         with mock.patch('booth.report.anthropic.Anthropic', return_value=fake_client(stream)), \
-                mock.patch('booth.report.monotonic', Clock(0, 0, 10, 151)):
+                mock.patch('booth.report.monotonic', Clock(0, 0, 10, DEADLINE + 1)):
             self.assertIs(report.call_claude('SYS', {}), stream.message)
 
     def test_watchdog_closes_silent_stream(self):
         stream = FakeStream(block_until_closed=True)
         # 타이머 계산 시점에 이미 마감 -> 즉시 스트림을 닫는다
         with mock.patch('booth.report.anthropic.Anthropic', return_value=fake_client(stream)), \
-                mock.patch('booth.report.monotonic', Clock(0, 150)):
+                mock.patch('booth.report.monotonic', Clock(0, DEADLINE)):
             with self.assertRaises(report.ReportDeadlineExceeded):
                 report.call_claude('SYS', {})
         self.assertTrue(stream.closed.is_set())
@@ -506,7 +591,7 @@ class CallClaudeTests(CleanEnvMixin, SimpleTestCase):
         # 닫힌 스트림이 예외 없이 끝나 미완성 메시지(stop_reason 없음)가 남는 경우
         stream = FakeStream(block_until_closed=True, end_quietly=True, message=fake_message(stop_reason=None))
         with mock.patch('booth.report.anthropic.Anthropic', return_value=fake_client(stream)), \
-                mock.patch('booth.report.monotonic', Clock(0, 150)):
+                mock.patch('booth.report.monotonic', Clock(0, DEADLINE)):
             with self.assertRaises(report.ReportDeadlineExceeded):
                 report.call_claude('SYS', {})
 
@@ -572,13 +657,17 @@ class SdkWireTests(ReportDbTestCase):
         self.assertTrue(body['stream'])
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(body['thinking'], {'type': 'adaptive'})
-        self.assertEqual(body['output_config']['effort'], 'medium')
+        self.assertEqual(body['output_config']['effort'], 'high')
         self.assertEqual(body['output_config']['format'], {'type': 'json_schema', 'schema': REPORT_SCHEMA})
         self.assertIn('server-side-fallback-2026-07-01', captured['headers'].get('anthropic-beta', ''))
         raw = json.dumps(body, ensure_ascii=False)
         self.assertNotIn(REAL_NAME, raw)
         self.assertNotIn(p.token, raw)
         self.assertNotIn(p.label, raw)
+        # 실제 전송 본문에 체험 전 값은 있고(pre_measurement), 체험 후·화면 표시값 객체는 없다.
+        self.assertIn('"heart_rate_bpm": 72', body['messages'][0]['content'])
+        self.assertNotIn('"after":', body['messages'][0]['content'])
+        self.assertNotIn('"displayed":', body['messages'][0]['content'])
 
     def test_wire_refusal(self):
         p = self.ready()
@@ -613,7 +702,7 @@ class SdkWireTests(ReportDbTestCase):
             return httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=body)
 
         with mock.patch('booth.report._make_client', self.client_factory(httpx.MockTransport(handler))), \
-                mock.patch('booth.report.monotonic', Clock(0, 150)):
+                mock.patch('booth.report.monotonic', Clock(0, DEADLINE)):
             with self.assertRaises(report.ReportDeadlineExceeded):
                 report.call_claude('SYS', {})
         self.assertTrue(body.closed.is_set())

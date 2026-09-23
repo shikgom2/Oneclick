@@ -1,11 +1,72 @@
-{# 완료된 리포트. 비교표 숫자는 서버가 측정값으로 만들고, AI 문장은 자동 이스케이프로만 출력한다. #}
+{% comment %}
+완료된 리포트. 표 세 개의 숫자·판정은 서버가 저장된 설문·측정값으로 만들고(survey_metrics, measurement_metrics,
+display_sides), AI 문장은 자동 이스케이프로만 출력한다. 새 칸(sleep_analysis, autonomic_analysis, personal_note,
+caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #} 는 한 줄짜리라 여러 줄 주석은 comment 태그를 쓴다.)
+{% endcomment %}
 <article class="report">
   <header class="card">
-    <p class="muted small">체험일 {{ report_date }} · {{ label }}</p>
+    <p class="muted small">체험일 {{ report_date }} · 참가번호 {{ label }}</p>
     <h1>{{ name_display }}님의 체험 리포트</h1>
     <p class="headline ai">{{ report.headline.one_liner }}</p>
     <p class="ai">{{ report.headline.detail }}</p>
   </header>
+
+  {% if survey_rows %}
+  <section class="card">
+    <h2>설문으로 계산한 수면 지표</h2>
+    <div class="table-wrap">
+      <table class="metrics">
+        <thead><tr><th scope="col">항목</th><th scope="col">응답</th><th scope="col">값</th><th scope="col">참고</th><th scope="col">해석</th></tr></thead>
+        <tbody>
+        {% for row in survey_rows %}
+          <tr><th scope="row">{{ row.label }}</th><td data-th="응답">{{ row.answer }}</td><td class="num" data-th="값">{{ row.value }}</td><td data-th="참고">{{ row.reference }}</td><td class="verdict" data-th="해석">{{ row.verdict }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if survey_score %}<p class="score">{{ survey_score.summary }}</p>{% endif %}
+    <p class="muted small">{{ survey_note }}</p>
+  </section>
+  {% endif %}
+
+  {% if report.sleep_analysis %}
+  <section class="card">
+    <h2>수면 상태 풀이</h2>
+    <p class="ai">{{ report.sleep_analysis }}</p>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>설문으로 살펴본 생활 습관</h2>
+    {% for item in report.survey_insights %}
+    <div class="item">
+      <h3>{{ item.title }}</h3>
+      <p class="ai">{{ item.body }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <h2>체험 전 측정값</h2>
+    <div class="table-wrap">
+      <table class="metrics">
+        <thead><tr><th scope="col">항목</th><th scope="col">값</th><th scope="col">참고 범위</th><th scope="col">해석</th></tr></thead>
+        <tbody>
+        {% for row in pre_rows %}
+          <tr><th scope="row">{{ row.label }}{% if row.gloss %}<span class="gloss">{{ row.gloss }}</span>{% endif %}</th><td class="num" data-th="값">{{ row.value }}</td><td data-th="참고 범위">{{ row.reference }}</td><td class="verdict" data-th="해석">{{ row.verdict }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted small">{{ pre_note }}</p>
+  </section>
+
+  {% if report.autonomic_analysis %}
+  <section class="card">
+    <h2>체험 전 측정값 풀이</h2>
+    <p class="ai">{{ report.autonomic_analysis }}</p>
+  </section>
+  {% endif %}
 
   <section class="card">
     <h2>체험 전·후 값</h2>
@@ -29,30 +90,34 @@
   </section>
 
   <section class="card">
-    <h2>설문으로 살펴본 생활 습관</h2>
-    {% for item in report.survey_insights %}
-    <div class="item">
-      <h3>{{ item.title }}</h3>
-      <p class="ai">{{ item.body }}</p>
-    </div>
-    {% endfor %}
-  </section>
-
-  <section class="card">
     <h2>지표 이해하기</h2>
     {% for item in indices %}
     <div class="item">
       <h3>{{ item.label }}{% if item.gloss %} <span class="gloss-inline">({{ item.gloss }})</span>{% endif %}</h3>
       <p class="ai">{{ item.meaning }}</p>
       <p class="ai muted">{{ item.reading }}</p>
+      {% if item.personal_note %}<p class="ai personal">{{ item.personal_note }}</p>{% endif %}
+      {% if item.own %}
+      <p class="own-values"><span class="own-label">내 값</span> 체험 전 <strong>{{ item.own.before.value }}</strong>{% if item.own.before.band %} ({{ item.own.before.band }}){% endif %} · 체험 후 <strong>{{ item.own.after.value }}</strong>{% if item.own.after.band %} ({{ item.own.after.band }}){% endif %}</p>
+      {% endif %}
     </div>
     {% endfor %}
+    {# '내 값'은 위 전·후 표와 같은 값이다. 출처(표시값이면 시연용 보정 포함)와 효과로 볼 수 없다는 점을 한 번 알린다. #}
+    {% if own_note %}<p class="muted small">{{ own_note }}</p>{% endif %}
   </section>
 
   <section class="card">
     <h2>일상에서 해볼 수 있는 방법</h2>
     <ul class="tips">
       {% for tip in report.tips %}<li class="ai">{{ tip }}</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>이 리포트를 읽을 때 유의점</h2>
+    <ul class="caveats">
+      {% for item in report.caveats %}<li class="ai">{{ item }}</li>{% endfor %}
+      <li>이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.</li>
     </ul>
   </section>
 
@@ -66,7 +131,6 @@
   </div>
 
   <footer class="report-footer">
-    <p>이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.</p>
     <p>이 주소를 아는 사람은 누구나 이 리포트를 볼 수 있습니다. 다른 사람에게 보여 주려면 주소 대신 PDF로 저장해 공유해 주세요.</p>
     <p>이 리포트는 {{ deletion_date }}에 삭제됩니다.</p>
   </footer>

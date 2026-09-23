@@ -35,7 +35,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views.decorators.csrf import csrf_exempt
 
-from . import conf, services
+from . import conf, measurement_metrics, services, survey_metrics
 from . import report as booth_report     # generate_report 를 호출 시점에 찾아야 테스트 mock 이 먹는다
 from .models import Participant
 from .report_schema import INDEX_GLOSSES, INDEX_LABELS, ReportInvalid, validate_report
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 Status = Participant.ReportStatus
 
-# 개인 페이지가 상태를 확인하는 간격. 리포트 생성(1~2분)을 기다리는 동안 워커를 과하게
+# 개인 페이지가 상태를 확인하는 간격. 리포트 생성(2~3분)을 기다리는 동안 워커를 과하게
 # 두드리지 않으면서, 측정이 끝난 뒤 화면이 늦지 않게 바뀌는 정도.
 PERSONAL_POLL_MS = 4000
 # 화면이 보이는 동안 이 시간이 지나면 폴링을 멈춘다. 휴대폰에 열어둔 채 잊힌 탭이 하루 종일
@@ -335,11 +335,14 @@ def format_value(value):
 def _report_context(participant):
     """완료된 리포트 화면용 값. 저장된 리포트가 구조와 맞지 않으면 None.
 
-    전/후 비교표는 AI 출력이 아니라 서버가 측정값으로 직접 만든다(AI 에는 숫자를 보내지도 않는다).
-    캡션 규칙(표시값/측정값)은 services.display_sides 한 곳에서 정한다. 변화량 열은 일부러 두지 않는다.
-    화면 표시값에는 시연용 보정이 들어 있어 차이를 개인의 효과처럼 읽게 만들면 안 된다.
+    표 세 개는 모두 AI 출력이 아니라 서버가 저장된 설문·측정값으로 렌더링 시점에 만든다. 그래서 이미 리포트가
+    저장된 참가자도 새 표가 보이고, AI 문장에 숫자 오류가 있어도 표의 숫자는 맞다.
+      - 설문 수면 지표 표: survey_metrics (응답 구간 중앙값 추정, 간이 점수)
+      - 체험 전 측정값 표: measurement_metrics (참고 범위·판정)
+      - 전/후 비교표: 캡션 규칙(표시값/측정값)은 services.display_sides 한 곳에서 정한다. 변화량 열은 일부러 두지
+        않는다. 화면 표시값에는 시연용 보정이 들어 있어 차이를 개인의 효과처럼 읽게 만들면 안 된다.
     화면에서는 validate_report 를 느슨하게(strict=False) 써서, 저장 뒤에 규칙이 엄격해져도 이미
-    만든 리포트가 '표시할 수 없음'이 되지 않게 한다.
+    만든 리포트가 '표시할 수 없음'이 되지 않게 한다(새 칸이 없는 예전 리포트는 그 칸만 건너뛴다).
     """
     p = participant
     try:
@@ -348,6 +351,10 @@ def _report_context(participant):
         logger.warning('[booth] 저장된 리포트 형식 오류 %s (%s)', p.label, exc)
         return None
 
+    survey = survey_metrics.compute_survey_metrics(services.survey_answers_for_ai(p.survey_answers))
+    # 나이는 원본 응답에서 읽는다(AI 로 가는 쪽에서는 생년월일 문항을 빼기 때문이다).
+    pre = measurement_metrics.interpret_pre_measurement(
+        p.measurement, age=survey_metrics.parse_age(p.survey_answers))
     sides = services.display_sides(p.measurement)
     rows = [
         {
@@ -358,15 +365,27 @@ def _report_context(participant):
         }
         for key, label in services.COMPARISON_ROWS
     ]
-    indices = [dict(item, label=INDEX_LABELS.get(item['key'], item['key']), gloss=INDEX_GLOSSES.get(item['key'], ''))
+    # 지표마다 '내 값'(체험 전·후 값 + 구간 이름)을 붙인다. 위 비교표와 같은 값(sides)을 써서 숫자가 어긋나지 않게
+    # 하고, AI 가 아니라 서버가 만든다(체험 후 표시값에는 시연용 보정이 들어 있어 AI 에게 넘기지 않는다).
+    indices = [dict(item, label=INDEX_LABELS.get(item['key'], item['key']), gloss=INDEX_GLOSSES.get(item['key'], ''),
+                    own=measurement_metrics.describe_own_values(
+                        item['key'], sides.before.get(item['key']), sides.after.get(item['key'])))
                for item in report['indices']]
     experienced_at = services.kst(p.measurement_received_at or p.created_at)
     return {
         'report': report,
         'indices': indices,
+        'own_source': sides.caption,
+        'own_note': (measurement_metrics.OWN_VALUES_NOTE_DISPLAYED if sides.is_displayed
+                     else measurement_metrics.OWN_VALUES_NOTE_RAW),
         'caption': sides.caption,
         'is_displayed': sides.is_displayed,
         'rows': rows,
+        'survey_rows': survey.rows,
+        'survey_score': survey.score,
+        'survey_note': survey_metrics.ESTIMATE_NOTE,
+        'pre_rows': pre.rows,
+        'pre_note': pre.note,
         'report_date': experienced_at.strftime('%Y-%m-%d'),
     }
 

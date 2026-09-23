@@ -36,7 +36,7 @@ from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from django.utils.dateparse import parse_datetime
 
-from . import conf
+from . import conf, survey_metrics
 from .models import Participant, new_token
 
 logger = logging.getLogger(__name__)
@@ -291,15 +291,21 @@ def identifying_titles():
 
 
 def survey_answers_for_ai(answers):
-    """AI 에 보낼 설문 응답. 이름·동의·참가자 번호·확인 코드 문항을 뺀 새 dict.
+    """AI 에 보낼 설문 응답. 이름·동의·참가자 번호·확인 코드·생년월일 문항을 뺀 새 dict.
 
     실명과 번호는 리포트 생성에 필요 없고, 국외(Anthropic) 전송 범위를 동의 문구대로
     '이름을 제외한 설문 응답'으로 한정하기 위해 여기서 확실히 제거한다. 같은 제목이 두 번 있어
     Apps Script 가 '이름 (2)' 로 보낸 문항도 함께 뺀다.
+
+    생년월일도 뺀다. RMSSD 참고값에 필요한 것은 나이대뿐이고, 그 이름('55~64세')만
+    measurement_metrics 가 따로 넣는다.
     """
     if not isinstance(answers, dict):
         return {}
     excluded = identifying_titles()
+    age_title = survey_metrics.find_age_title(answers)
+    if age_title:
+        excluded = excluded | {_normalize_title(age_title)}
     return {k: v for k, v in answers.items() if not _title_in(k, excluded)}
 
 

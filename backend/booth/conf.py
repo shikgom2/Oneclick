@@ -192,7 +192,8 @@ def report_model():
 
 
 def report_effort():
-    return _str('BOOTH_REPORT_EFFORT', 'medium')
+    """output_config.effort. 설문 지표·측정값을 인용하는 자세한 리포트를 쓰므로 기본 high."""
+    return _str('BOOTH_REPORT_EFFORT', 'high')
 
 
 def report_max_tokens():
@@ -200,8 +201,12 @@ def report_max_tokens():
 
 
 def report_deadline_sec():
-    """스트림을 끊는 마감(초, 10~200). 위 STALE_GENERATING_SEC 계산의 전제라 200 을 넘기지 않는다."""
-    return _int('BOOTH_REPORT_DEADLINE_SEC', 150, minimum=10, maximum=REPORT_DEADLINE_MAX_SEC)
+    """스트림을 끊는 마감(초, 10~200). 위 STALE_GENERATING_SEC 계산의 전제라 200 을 넘기지 않는다.
+
+    자세한 리포트는 출력이 길어(문단마다 여러 문장) 기본을 상한인 200 으로 둔다. 워커 수명 예산(위 주석)은
+    처음부터 마감 200 을 전제로 잡혀 있어 멈춤 판정·harakiri 와의 관계는 그대로다.
+    """
+    return _int('BOOTH_REPORT_DEADLINE_SEC', REPORT_DEADLINE_MAX_SEC, minimum=10, maximum=REPORT_DEADLINE_MAX_SEC)
 
 
 def max_concurrent_reports():

@@ -17,10 +17,10 @@ from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from booth import conf, services, views_pages
+from booth import conf, measurement_metrics, services, views_pages
 from booth.models import Participant
 from booth.report_schema import EXAMPLE_REPORT
-from booth.tests.test_services import CleanEnvMixin, booth_env, measurement_payload, survey
+from booth.tests.test_services import CleanEnvMixin, booth_env, measurement_payload, side, survey
 
 Status = Participant.ReportStatus
 
@@ -567,10 +567,17 @@ class ReportRenderingTests(PageTestCase):
         for label, gloss in (('Sleep Index', '이완 지표'), ('Autonomic Balance', '자율신경 균형'),
                              ('Stress/Recovery Index', '회복 지표')):
             self.assertContains(response, '<h3>%s <span class="gloss-inline">(%s)</span></h3>' % (label, gloss))
+        for item in EXAMPLE_REPORT['indices']:
+            self.assertContains(response, item['personal_note'])
+        self.assertContains(response, EXAMPLE_REPORT['sleep_analysis'])
+        self.assertContains(response, EXAMPLE_REPORT['autonomic_analysis'])
+        for caveat in EXAMPLE_REPORT['caveats']:
+            self.assertContains(response, caveat)
 
         # 비교표: 서버가 displayed 값으로 만든다. 캡션이 숫자 바로 위(표 caption)에 있다.
         self.assertInHTML('<caption>체험 화면 표시값 (시연용 보정 포함)</caption>', content)
-        self.assertLess(content.index('<caption>'), content.index('<tbody>'))
+        cmp_table = content.index('<table class="cmp">')
+        self.assertLess(content.index('<caption>', cmp_table), content.index('<tbody>', cmp_table))
         self.assertInHTML('<tr><th scope="row">Sleep Index<span class="gloss">이완 지표</span></th>'
                           '<td>55</td><td>70</td></tr>', content)
         self.assertInHTML('<tr><th scope="row">Autonomic Balance<span class="gloss">자율신경 균형</span></th>'
@@ -580,12 +587,115 @@ class ReportRenderingTests(PageTestCase):
         self.assertInHTML('<tr><th scope="row">심박수 (bpm)</th><td>72</td><td>72</td></tr>', content)
         self.assertNotIn('<caption>측정값</caption>', content)
 
-        # 고정 푸터와 삭제일, 인쇄 버튼
+        # 체험 전 측정값 표: 서버가 before 값으로 만든다(참고 범위·해석 포함). 체험 후 값(68, 62)은 이 표에 없다.
+        self.assertInHTML('<tr><th scope="row">심박수</th><td class="num" data-th="값">72 bpm</td>'
+                          '<td data-th="참고 범위">안정 시 60~100 bpm</td><td class="verdict" data-th="해석">참고 범위 안</td></tr>',
+                          content)
+        self.assertInHTML('<tr><th scope="row">RMSSD<span class="gloss">심박 간격 변동</span></th>'
+                          '<td class="num" data-th="값">35.5 ms</td><td data-th="참고 범위">성인 안정 시 흔한 범위 20~50 ms</td>'
+                          '<td class="verdict" data-th="해석">흔한 범위 안</td></tr>', content)
+        self.assertContains(response, '300회')
+        self.assertContains(response, '중간 (앱 등급 Warning)')
+        self.assertContains(response, '체험 전 약 60초 동안 손가락에 낀 링(PPG)으로 측정한 값입니다.')
+
+        # 설문 지표 표: 기본 설문에는 잠들기까지 문항 하나뿐이라 그 행만 있고 간이 점수는 계산 불가.
+        self.assertContains(response, '설문으로 계산한 수면 지표')
+        self.assertInHTML('<tr><th scope="row">잠들기까지 걸린 시간</th><td data-th="응답">30분 이상</td>'
+                          '<td class="num" data-th="값">30분 이상</td><td data-th="참고">15분 이내 양호 (PSQI 구간)</td>'
+                          '<td class="verdict" data-th="해석">긴 편</td></tr>', content)
+        self.assertContains(response, '간이 수면 점수: 계산 불가 (4개 항목 중 1개만 계산됨)')
+
+        # 화면 순서: 요약 -> 설문 지표 표 -> 수면 풀이 -> 생활 습관 -> 체험 전 측정값 -> 측정 풀이 -> 전·후 표 ->
+        # 지표 이해 -> 방법 -> 유의점 -> 마무리 -> 인쇄 버튼 -> 푸터
+        order = ['님의 체험 리포트', '설문으로 계산한 수면 지표', '수면 상태 풀이', '설문으로 살펴본 생활 습관',
+                 '<h2>체험 전 측정값</h2>', '체험 전 측정값 풀이', '체험 전·후 값', '지표 이해하기',
+                 '일상에서 해볼 수 있는 방법', '이 리포트를 읽을 때 유의점', EXAMPLE_REPORT['closing'],
+                 'id="print-btn"', 'class="report-footer"']
+        positions = [content.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions), order)
+
+        # 템플릿 주석이 본문으로 새지 않는다({# #} 는 한 줄짜리라 여러 줄이면 그대로 출력된다).
+        self.assertNotIn('{#', content)
+        self.assertNotIn('#}', content)
+        self.assertNotIn('{%', content)
+
+        # 고정 문구(유의점 안), 푸터의 삭제일, 인쇄 버튼, 인쇄 CSS
         self.assertContains(response, '이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.')
         self.assertContains(response, '이 리포트는 %s에 삭제됩니다.' % services.deletion_date(p).isoformat())
         self.assertContains(response, 'PDF로 저장')
         self.assertContains(response, 'window.print()')
         self.assertContains(response, '.no-print { display: none !important; }')
+        for rule in ('@page { margin:', 'tr, .item { break-inside: avoid; page-break-inside: avoid; }',
+                     'h1, h2, h3 { break-after: avoid; page-break-after: avoid; }', '@media (max-width: 480px)',
+                     '.metrics td::before { content: attr(data-th)'):
+            self.assertIn(rule, content, rule)
+
+    def test_full_sleep_survey_shows_metric_rows_and_score(self):
+        from booth.tests.test_report import SLEEP_SURVEY
+        answers = survey(**SLEEP_SURVEY)
+        del answers['평소 잠들기까지 걸리는 시간']         # 기본 문항이 3번 문항보다 먼저 잠들기까지 문항으로 잡히지 않게
+        p = self.issue()
+        services.apply_survey(p, answers)
+        services.apply_measurement(p, services.validate_measurement(measurement_payload()))
+        p = self.mark(p, report_status=Status.DONE, report=EXAMPLE_REPORT, report_attempts=1)
+        content = self.html_text(self.get(p))
+        for text in ('약 23:30', '약 07:30', '약 8시간 (추정)', '약 6.5시간 (추정)', '약 81.2% (추정)', '2회',
+                     '조금 개운함', '5단계 자기평가', '간이 수면 점수 5점 / 12점 (4개 항목 중 4개로 계산) · 보통',
+                     '값은 응답한 구간의 중앙값으로 추정한 것이라'):
+            self.assertIn(text, content, text)
+        rows = ['잠자리에 든 시각', '잠자리에서 나온 시각', '잠자리에 머문 시간', '잠들기까지 걸린 시간', '총 수면 시간',
+                '수면 효율', '밤중에 깬 횟수', '아침에 일어났을 때 개운한 정도', '어젯밤 잠에 대한 만족도',
+                '지금 이 순간의 개운함', '평소 취침 시각의 규칙성']
+        positions = [content.index('<th scope="row">%s</th>' % row) for row in rows]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_survey_without_sleep_questions_hides_metric_table(self):
+        p = self.with_survey(self.issue(), **{'평소 잠들기까지 걸리는 시간': ''})   # 기본 문항의 응답도 비움
+        answers = dict(p.survey_answers)
+        del answers['평소 잠들기까지 걸리는 시간']
+        services.apply_survey(p, dict(answers, **{'관심사': '수면'}))
+        services.apply_measurement(p, services.validate_measurement(measurement_payload()))
+        p = self.mark(p, report_status=Status.DONE, report=EXAMPLE_REPORT, report_attempts=1)
+        self.assertEqual(services.survey_answers_for_ai(p.survey_answers), {'관심사': '수면'})
+        content = self.html_text(self.get(p))
+        # (헤드라인 예시 문장에도 같은 낱말이 있으므로 제목 요소로 확인한다.)
+        self.assertNotIn('<h2>설문으로 계산한 수면 지표</h2>', content)
+        self.assertNotIn('<table class="metrics">\n        <thead><tr><th scope="col">항목</th><th scope="col">응답</th>', content)
+        self.assertNotIn('<p class="score">', content)                # 간이 점수 줄도 없다(AI 예시 문장은 언급할 수 있다)
+        self.assertIn('<h2>체험 전 측정값</h2>', content)       # 측정 표와 나머지는 그대로
+
+    def test_missing_pre_values_render_as_not_measured(self):
+        from booth.tests.test_services import side
+        payload = measurement_payload(before=side(rmssd_ms=None, sdnn_ms=None, sleep_index=None, rr_count=12))
+        p = self.with_survey(self.issue())
+        services.apply_measurement(p, services.validate_measurement(payload))
+        p = self.mark(p, report_status=Status.DONE, report=EXAMPLE_REPORT, report_attempts=1)
+        content = self.html_text(self.get(p))
+        self.assertInHTML('<tr><th scope="row">RMSSD<span class="gloss">심박 간격 변동</span></th>'
+                          '<td class="num" data-th="값">측정되지 않음</td><td data-th="참고 범위">성인 안정 시 흔한 범위 20~50 ms</td>'
+                          '<td class="verdict" data-th="해석">링 접촉 부족으로 계산 불가</td></tr>', content)
+        self.assertIn('접촉 부족으로 신뢰도 낮음', content)
+        self.assertIn('HRV 계산 실패 시 앱 기본값일 수 있음', content)
+
+    def test_old_shape_report_still_renders(self):
+        # 새 칸이 없던 때 저장된 리포트: 그 칸의 섹션만 빠지고 나머지(표 포함)는 그대로 그린다.
+        old = copy.deepcopy(EXAMPLE_REPORT)
+        for key in ('sleep_analysis', 'autonomic_analysis', 'caveats'):
+            del old[key]
+        for item in old['indices']:
+            del item['personal_note']
+        p = self.done(report=old)
+        response = self.get(p)
+        content = self.html_text(response)
+        self.assertContains(response, 'data-state="done"')
+        self.assertNotIn('수면 상태 풀이', content)
+        self.assertNotIn('체험 전 측정값 풀이', content)
+        self.assertNotIn('class="ai personal"', content)
+        for heading in ('설문으로 계산한 수면 지표', '<h2>체험 전 측정값</h2>', '체험 전·후 값', '지표 이해하기',
+                        '이 리포트를 읽을 때 유의점'):
+            self.assertIn(heading, content, heading)
+        self.assertContains(response, '이 리포트는 체험용이며 의학적 진단이나 효과 판정이 아닙니다.')
+        self.assertContains(response, EXAMPLE_REPORT['closing'])
 
     def test_caption_switches_to_raw_values_when_displayed_missing(self):
         p = self.done(displayed=False)
@@ -597,6 +707,46 @@ class ReportRenderingTests(PageTestCase):
                           '<td>55</td><td>62</td></tr>', content)
         self.assertInHTML('<tr><th scope="row">심박수 (bpm)</th><td>72</td><td>68</td></tr>', content)
 
+    # --- '지표 이해하기'의 지표별 '내 값' (체험 전·후 값 + 구간 이름) ---
+    OWN_LINE = ('<p class="own-values"><span class="own-label">내 값</span> 체험 전 <strong>%s</strong>%s'
+                ' · 체험 후 <strong>%s</strong>%s</p>')
+
+    def test_own_values_use_the_same_numbers_as_the_comparison_table(self):
+        # 화면 표시값: Sleep Index 55 -> 70, Autonomic Balance 48 -> 48, Stress/Recovery 60 -> 60 (test_services.side)
+        content = self.html_text(self.get(self.done()))
+        self.assertInHTML(self.OWN_LINE % ('55', ' (중간)', '70', ' (높음)'), content)
+        self.assertInHTML(self.OWN_LINE % ('48', ' (중간)', '48', ' (중간)'), content)
+        self.assertInHTML(self.OWN_LINE % ('60', ' (중간 (앱 등급 Warning))', '60', ' (중간 (앱 등급 Warning))'), content)
+        self.assertEqual(content.count('class="own-values"'), 3)
+        # 출처와 '효과로 볼 수 없음'은 섹션에 한 번만 알린다
+        self.assertEqual(content.count(measurement_metrics.OWN_VALUES_NOTE_DISPLAYED.replace("'", '&#x27;')), 1)
+        self.assertNotIn(measurement_metrics.OWN_VALUES_NOTE_RAW.replace("'", '&#x27;'), content)
+
+    def test_own_values_fall_back_to_raw_values_when_displayed_missing(self):
+        # 앱이 화면값을 보내지 않으면 표와 같이 원 측정값(after sleep_index 62)을 쓰고, 보정 문구는 나오지 않는다
+        content = self.html_text(self.get(self.done(displayed=False)))
+        self.assertInHTML(self.OWN_LINE % ('55', ' (중간)', '62', ' (중간)'), content)
+        self.assertEqual(content.count(measurement_metrics.OWN_VALUES_NOTE_RAW.replace("'", '&#x27;')), 1)
+        self.assertNotIn('시연을 위한 보정', content)
+
+    def test_own_values_show_not_measured_without_a_band(self):
+        p = self.with_survey(self.issue())
+        payload = measurement_payload(displayed={
+            'before': side(sleep_index=None), 'after': side(sleep_index=None, autonomic_balance=None)})
+        services.apply_measurement(p, services.validate_measurement(payload))
+        p = self.mark(p, report_status=Status.DONE, report=EXAMPLE_REPORT, report_attempts=1)
+        content = self.html_text(self.get(p))
+        self.assertInHTML(self.OWN_LINE % ('측정되지 않음', '', '측정되지 않음', ''), content)
+        self.assertInHTML(self.OWN_LINE % ('48', ' (중간)', '측정되지 않음', ''), content)
+
+    def test_own_values_never_use_effect_wording(self):
+        content = self.html_text(self.get(self.done()))
+        own_lines = re.findall(r'<p class="own-values">.*?</p>', content, re.S)
+        self.assertEqual(len(own_lines), 3)
+        for line in own_lines:
+            for word in ('개선', '좋아', '올랐', '상승', '효과', '→', '증가'):
+                self.assertNotIn(word, line)
+
     def test_ai_text_is_escaped(self):
         evil = copy.deepcopy(EXAMPLE_REPORT)
         evil['headline']['one_liner'] = '<script>alert(1)</script>'
@@ -605,10 +755,15 @@ class ReportRenderingTests(PageTestCase):
         evil['indices'][0]['reading'] = '<iframe src="https://evil.example"></iframe>'
         evil['tips'][0] = '<a href="javascript:alert(3)">tip</a>'
         evil['closing'] = '</p><script>alert(4)</script>'
+        evil['sleep_analysis'] = '<script>alert(5)</script>'
+        evil['autonomic_analysis'] = '<img src=y onerror=alert(6)>'
+        evil['indices'][1]['personal_note'] = '<svg onload=alert(7)>'
+        evil['caveats'][0] = '</li><script>alert(8)</script>'
         p = self.done(report=evil)
         content = self.html_text(self.get(p))
         for raw in ('<script>alert(1)</script>', '<img src=x', '<b>bold</b>', '<iframe src="https://evil.example"',
-                    '<a href="javascript:alert(3)"', '<script>alert(4)'):
+                    '<a href="javascript:alert(3)"', '<script>alert(4)', '<script>alert(5)', '<img src=y',
+                    '<svg onload', '<script>alert(8)'):
             self.assertNotIn(raw, content)
         self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', content)
         self.assertIn('&lt;img src=x onerror=alert(2)&gt;', content)

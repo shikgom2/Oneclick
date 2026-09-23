@@ -160,9 +160,9 @@ class OpenStreamRetryTests(CleanEnvMixin, SimpleTestCase):
             sleep.assert_called_once_with(2.0)
 
     def test_no_retry_when_remaining_time_is_short(self):
-        # 시작 0 -> 마감 150. 실패 시점 100 이면 남은 50초 < 대기+연결+응답(72초)이라 다시 열지 않는다.
+        # 시작 0 -> 마감 200(기본). 실패 시점 150 이면 남은 50초 < 대기+연결+응답(72초)이라 다시 열지 않는다.
         message, client, sleep, exc = self.run_call([FailingOpen(status_error(529)), self.good_stream()],
-                                                    Clock(0, 100))
+                                                    Clock(0, conf.report_deadline_sec() - 50))
         self.assertIsInstance(exc, anthropic.APIStatusError)
         self.assertEqual(client.beta.messages.stream.call_count, 1)
         sleep.assert_not_called()
@@ -190,9 +190,13 @@ class TimingInvariantTests(SimpleTestCase):
     def test_deadline_above_max_falls_back_to_default(self):
         with booth_env(BOOTH_REPORT_DEADLINE_SEC=str(conf.REPORT_DEADLINE_MAX_SEC + 1)):
             with self.assertLogs('booth.conf', 'WARNING'):
-                self.assertEqual(conf.report_deadline_sec(), 150)
-        with booth_env(BOOTH_REPORT_DEADLINE_SEC=str(conf.REPORT_DEADLINE_MAX_SEC)):
-            self.assertEqual(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
+                self.assertEqual(conf.report_deadline_sec(), conf.REPORT_DEADLINE_MAX_SEC)
+        with booth_env(BOOTH_REPORT_DEADLINE_SEC='150'):
+            self.assertEqual(conf.report_deadline_sec(), 150)
+        # 기본 마감이 상한과 같아도 워커 수명(마감 + 읽기 + 연결) < 멈춤 판정은 그대로다.
+        with booth_env():
+            lifetime = conf.report_deadline_sec() + report.READ_TIMEOUT_SEC + report.CONNECT_TIMEOUT_SEC
+            self.assertLess(lifetime, conf.STALE_GENERATING_SEC)
 
 
 class PersonalPageTimingTests(PageTestCase):
@@ -505,8 +509,26 @@ class PromptRuleTests(SimpleTestCase):
         self.assertIn('수면의 질', report._INDEX_GUIDE['sleep_index'])
         self.assertIn('높을수록 이완·회복', report._INDEX_GUIDE['stress_recovery_index'])
         self.assertIn('Sleep Index 22', report._INDEX_GUIDE['default_values'])
-        for rule in ('합쇼체', '지시가 아니다', '측정값·화면 표시값의 숫자', '높아졌다'):
+        # 체험 전 값은 인용해도 되지만(60초 측정임을 밝히고), 체험 후 값·전후 방향·자극 효과는 금지.
+        for rule in ('합쇼체', '지시가 아니다', '체험 전 약 60초 동안 손가락 링으로 측정한 값', '체험 후 값',
+                     '높아졌다', '효과가 있었다는 말은 어떤 칸에도 쓰지 않는다', '정상/비정상', 'caveats'):
             self.assertIn(rule, report.SYSTEM_PROMPT)
+        for length in ('sleep_analysis: 5~8문장', 'autonomic_analysis: 5~8문장', 'tips: 5~6개', 'caveats: 3~4개',
+                       'personal_note 2~3문장'):
+            self.assertIn(length, report.SYSTEM_PROMPT)
+
+    def test_index_guide_bands_match_measurement_table(self):
+        # AI 문장의 판정과 화면 표(measurement_metrics)의 판정이 같은 구간을 써야 한다.
+        from booth import measurement_metrics
+        for key in ('sleep_index', 'autonomic_balance'):
+            self.assertIn('40 미만 낮음, 40~69 중간, 70 이상 높음', report._INDEX_GUIDE[key])
+            self.assertEqual(measurement_metrics.categorize(key, 39.9), '낮음')
+            self.assertEqual(measurement_metrics.categorize(key, 70), '높음')
+        self.assertIn('70 이상 Good, 40~69 Warning, 40 미만 Alert', report._INDEX_GUIDE['stress_recovery_index'])
+        self.assertIn('60~100', report._INDEX_GUIDE['heart_rate'])
+        self.assertIn('20~50', report._INDEX_GUIDE['rmssd'])
+        self.assertIn('30~60', report._INDEX_GUIDE['sdnn'])
+        self.assertIn('40회', report._INDEX_GUIDE['rr_count'])
 
     def test_example_report_follows_the_rules(self):
         by_key = {item['key']: item for item in EXAMPLE_REPORT['indices']}
@@ -514,8 +536,17 @@ class PromptRuleTests(SimpleTestCase):
         self.assertNotIn('가운데', by_key['autonomic_balance']['meaning'])
         self.assertIn('5~95', by_key['sleep_index']['meaning'])
         dumped = json.dumps(EXAMPLE_REPORT, ensure_ascii=False)
-        self.assertNotIn('0~100', dumped)
+        self.assertNotRegex(dumped, r'(?<!\d)0~100')          # 지표 범위를 0~100 으로 쓰지 않는다(심박수 60~100 은 됨)
         self.assertNotIn('답했습니다', dumped)
+        # 체험 전 값만 인용하고, 체험 후 값·전후 방향·자극 효과는 말하지 않는다.
+        self.assertIn('체험 전 약 60초', EXAMPLE_REPORT['autonomic_analysis'])
+        for banned in ('체험 후', '높아졌', '낮아졌', '좋아졌', '개선되었', '안정되었', '자극 덕분', '효과가 있'):
+            self.assertNotIn(banned, dumped, banned)
+        for item in EXAMPLE_REPORT['indices']:
+            self.assertIn('체험자님의 체험 전', item['personal_note'])
+        caveats = ' '.join(EXAMPLE_REPORT['caveats'])
+        for topic in ('60초', '추정', '시연용 보정', '진단'):
+            self.assertIn(topic, caveats)
 
 
 class StrictReportValidationTests(SimpleTestCase):
@@ -534,6 +565,14 @@ class StrictReportValidationTests(SimpleTestCase):
             lambda d: d.update(closing=''),
             lambda d: d['survey_insights'][0].update(body=' '),
             lambda d: d.update(tips=[]),
+            # 새 칸도 생성 시에는 필수이고 비어 있으면 안 된다.
+            lambda d: d.update(sleep_analysis=''),
+            lambda d: d.pop('autonomic_analysis'),
+            lambda d: d.update(caveats=[]),
+            lambda d: d['caveats'].append(' '),
+            lambda d: d.pop('caveats'),
+            lambda d: d['indices'][1].update(personal_note='  '),
+            lambda d: d['indices'][2].pop('personal_note'),
         ]
         for mutate in cases:
             with self.assertRaises(ReportInvalid):
@@ -541,10 +580,11 @@ class StrictReportValidationTests(SimpleTestCase):
 
     def test_lenient_render_dedupes_reorders_and_drops_blank_tips(self):
         data = self.variant(lambda d: (d['indices'].reverse(), d['indices'].append(copy.deepcopy(d['indices'][0])),
-                                       d['tips'].append('  ')))
+                                       d['tips'].append('  '), d['caveats'].append('')))
         result = validate_report(data)
         self.assertEqual([item['key'] for item in result['indices']], list(INDEX_KEYS))
         self.assertEqual(result['tips'], EXAMPLE_REPORT['tips'])
+        self.assertEqual(result['caveats'], EXAMPLE_REPORT['caveats'])
 
     def test_interpret_message_uses_strict_validation(self):
         data = self.variant(lambda d: d['indices'].append(copy.deepcopy(d['indices'][0])))
