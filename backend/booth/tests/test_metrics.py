@@ -363,13 +363,16 @@ class AgeTests(SimpleTestCase):
             ('1965-12-31', 60),                     # 생일 전이면 한 살 적다
             ('1965-09-23', 61),                     # 생일 당일
             ('1965', 61), ('62세', 62), ('62', 62),
-            ('45~54세', 49), ('45 ~ 54', 49), ('50대', 55), ('65세 이상', 70), ('25세 미만', 20),
+            ('45~54세', 49), ('45 ~ 54', 49), ('45-54세', 49),
+            ('50대', 55), ('65세 이상', 70), ('25세 미만', 20),
         ]
         for text, expected in cases:
             self.assertEqual(sm.age_from_text(text, self.TODAY), expected, text)
 
     def test_age_from_text_gives_up_quietly(self):
-        for text in (None, '', '   ', '모름', '비밀입니다', '1800-01-01', '2999', '999세'):
+        # 연도 없는 날짜는 나이를 알 수 없다. '3~5세 범위'처럼 억지로 읽으면 엉뚱한 기준이 붙는다.
+        for text in (None, '', '   ', '모름', '비밀입니다', '1800-01-01', '2999', '999세',
+                     '03-05', '12/31', '3월 5일'):
             self.assertIsNone(sm.age_from_text(text, self.TODAY), text)
 
     def test_parse_age_finds_the_question_by_its_wording(self):

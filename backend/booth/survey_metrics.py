@@ -89,7 +89,8 @@ _AGE_TITLE_WORDS = (('생년월일',), ('생년',), ('출생',), ('태어난',),
 
 _FULL_DATE = re.compile(r'(\d{4})\D{1,3}(\d{1,2})\D{1,3}(\d{1,2})')
 _YEAR = re.compile(r'(?:^|[^\d])(19\d{2}|20\d{2})(?:[^\d]|$)')
-_AGE_RANGE = re.compile(r'(\d{1,3})\s*(?:세)?\s*[~\-–]\s*(\d{1,3})\s*세?')
+_AGE_RANGE = re.compile(r'(\d{1,3})\s*세?\s*[~–]\s*(\d{1,3})\s*세?')
+_AGE_RANGE_HYPHEN = re.compile(r'(\d{1,3})\s*세?\s*-\s*(\d{1,3})\s*세')
 _DECADE = re.compile(r'(\d{1,3})\s*대')
 _AT_LEAST = re.compile(r'(\d{1,3})\s*세?\s*이상')
 _UNDER = re.compile(r'(\d{1,3})\s*세?\s*(?:미만|이하)')
@@ -137,7 +138,7 @@ def age_from_text(text, today=None):
             age = today.year - year - ((today.month, today.day) < (month, day))
             return _sane_age(age)
 
-    match = _AGE_RANGE.search(text)
+    match = _AGE_RANGE.search(text) or _AGE_RANGE_HYPHEN.search(text)
     if match:
         low, high = int(match.group(1)), int(match.group(2))
         if low <= high and high <= 120:
