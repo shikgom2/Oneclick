@@ -438,12 +438,64 @@ class GenerateReportTests(ReportDbTestCase):
         self.assertIn('JSON', self.reload(p).report_error)
 
     def test_schema_mismatch_is_failed(self):
+        # 형식 오류는 서버가 한 번 자동 재시도하고, 그래도 틀리면 두 번째 오류로 실패한다.
         p = self.ready()
         broken = dict(EXAMPLE_REPORT)
         del broken['tips']
-        status, _ = self.generate(p, return_value=fake_message(content=[text_block(json.dumps(broken))]))
+        broken2 = dict(EXAMPLE_REPORT)
+        broken2['headline'] = dict(EXAMPLE_REPORT['headline'], detail='')
+        status, call = self.generate(p, side_effect=[
+            fake_message(content=[text_block(json.dumps(broken))]),
+            fake_message(content=[text_block(json.dumps(broken2))]),
+        ])
         self.assertEqual(status, Status.FAILED)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(self.reload(p).report_error, 'AI 출력 형식 오류: headline.detail 비어 있음')
+        self.assertEqual(self.reload(p).report_attempts, 1)      # 자동 재시도는 시도 횟수를 쓰지 않는다
+
+    def test_format_error_auto_retries_once_with_hint(self):
+        p = self.ready()
+        broken = dict(EXAMPLE_REPORT)
+        del broken['tips']
+        status, call = self.generate(p, side_effect=[
+            fake_message(content=[text_block(json.dumps(broken))]), fake_message()])
+        self.assertEqual(status, Status.DONE)
+        self.assertEqual(call.call_count, 2)
+        second = call.call_args_list[1]
+        self.assertEqual(second.kwargs['retry_hint'], 'AI 출력 형식 오류: tips 누락')
+        self.assertGreaterEqual(second.kwargs['deadline_sec'], report.AUTO_RETRY_MIN_DEADLINE_SEC)
+        fresh = self.reload(p)
+        self.assertEqual(fresh.report_attempts, 1)
+        self.assertEqual(fresh.report_error, '')
+
+    def test_refusal_and_max_tokens_are_not_auto_retried(self):
+        for message in (fake_message(stop_reason='refusal'), fake_message(stop_reason='max_tokens')):
+            p = self.ready()
+            status, call = self.generate(p, return_value=message)
+            self.assertEqual(status, Status.FAILED)
+            self.assertEqual(call.call_count, 1)
+
+    def test_auto_retry_skipped_when_first_call_used_the_budget(self):
+        p = self.ready()
+        broken = dict(EXAMPLE_REPORT)
+        del broken['tips']
+        slow = Clock(0, report.AUTO_RETRY_TOTAL_BUDGET_SEC - 10, report.AUTO_RETRY_TOTAL_BUDGET_SEC)
+        with mock.patch('booth.report.monotonic', slow):
+            status, call = self.generate(p, return_value=fake_message(content=[text_block(json.dumps(broken))]))
+        self.assertEqual(status, Status.FAILED)
+        self.assertEqual(call.call_count, 1)
         self.assertEqual(self.reload(p).report_error, 'AI 출력 형식 오류: tips 누락')
+
+    def test_auto_retry_deadline_budget(self):
+        with mock.patch.dict(os.environ, {'BOOTH_REPORT_DEADLINE_SEC': '150'}):
+            self.assertEqual(report._auto_retry_deadline_sec(50), 150)
+            self.assertEqual(report._auto_retry_deadline_sec(200), 100)
+            self.assertIsNone(report._auto_retry_deadline_sec(245))
+            self.assertIsNone(report._auto_retry_deadline_sec(400))
+        self.assertTrue(report._is_format_error('AI 출력 형식 오류: tips 누락'))
+        self.assertTrue(report._is_format_error('AI 출력을 JSON 으로 해석하지 못했습니다.'))
+        self.assertFalse(report._is_format_error('AI 거절(other)'))
+        self.assertFalse(report._is_format_error(''))
 
     def test_no_text_block_is_failed(self):
         p = self.ready()

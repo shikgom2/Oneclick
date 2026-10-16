@@ -331,10 +331,13 @@ class ReportSchemaTests(SimpleTestCase):
         # 속성 순서 = 화면 순서(모델이 앞에서 인용한 값을 뒤에서 이어 쓰기 쉽게).
         self.assertEqual(list(REPORT_SCHEMA['properties']),
                          ['headline', 'survey_insights', 'autonomic_analysis', 'indices', 'tips', 'closing'])
-        key_schema = REPORT_SCHEMA['properties']['indices']['items']['properties']['key']
-        self.assertEqual(key_schema['enum'], list(INDEX_KEYS))
-        self.assertEqual(list(REPORT_SCHEMA['properties']['indices']['items']['properties']),
-                         ['key', 'meaning', 'reading'])
+        # 지표는 키마다 한 칸인 객체: 세 키가 모두 required 라 누락·중복이 스키마에서 막힌다.
+        indices_schema = REPORT_SCHEMA['properties']['indices']
+        self.assertEqual(indices_schema['type'], 'object')
+        self.assertEqual(list(indices_schema['properties']), list(INDEX_KEYS))
+        self.assertEqual(indices_schema['required'], list(INDEX_KEYS))
+        for key in INDEX_KEYS:
+            self.assertEqual(list(indices_schema['properties'][key]['properties']), ['meaning', 'reading'])
         self.assertEqual(REPORT_SCHEMA['properties']['tips']['minItems'], 1)
 
     def test_example_report_validates(self):

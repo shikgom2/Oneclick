@@ -479,7 +479,7 @@ class DeployCheckTests(CleanEnvMixin, SimpleTestCase):
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f'):
             self.assertIn('booth.W001', self.ids(inside))
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f',
-                       BOOTH_PUBLIC_BASE_URL='https://ntxoneclick.co.kr'):
+                       BOOTH_PUBLIC_BASE_URL='http://ntxoneclick.co.kr:8000'):
             self.assertIn('booth.W002', self.ids())
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k'):
             self.assertIn('booth.W003', self.ids())
@@ -569,6 +569,20 @@ class StrictReportValidationTests(SimpleTestCase):
         for mutate in cases:
             with self.assertRaises(ReportInvalid):
                 validate_report(self.variant(mutate), strict=True)
+
+    def test_indices_object_form_is_accepted_and_ordered(self):
+        # 모델 출력(스키마)은 지표를 키마다 한 칸인 객체로 준다. 저장 형식은 종전 목록이어야 한다.
+        data = copy.deepcopy(EXAMPLE_REPORT)
+        items = {item['key']: {'meaning': item['meaning'], 'reading': item['reading']} for item in data['indices']}
+        data['indices'] = {key: items[key] for key in reversed(INDEX_KEYS)}
+        result = validate_report(data, strict=True)
+        self.assertEqual(result['indices'], EXAMPLE_REPORT['indices'])
+        data['indices'].pop('autonomic_balance')
+        with self.assertRaises(ReportInvalid):
+            validate_report(data, strict=True)
+        data['indices'] = {'sleep_index': items['sleep_index'], 'unknown': {'meaning': 'x', 'reading': 'y'}}
+        with self.assertRaises(ReportInvalid):
+            validate_report(data)
 
     def test_lenient_render_dedupes_reorders_and_drops_blank_tips(self):
         data = self.variant(lambda d: (d['indices'].reverse(), d['indices'].append(copy.deepcopy(d['indices'][0])),

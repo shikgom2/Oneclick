@@ -76,20 +76,16 @@ REPORT_SCHEMA = _obj({
         '심박수와 RMSSD 를 참고 범위·판정과 함께 읽고, 나이대 기준(age_band)이 있으면 같은 나이대와 견준다. '
         '체험 전 약 60초 측정임을 밝히고, 체험 후 값·전·후 변화·자극 효과는 쓰지 않는다.'
     ),
-    'indices': {
-        'type': 'array',
-        'minItems': 1,
-        'description': '세 지표 각각에 대한 설명. 지표마다 정확히 한 항목.',
-        'items': _obj({
-            'key': {
-                'type': 'string',
-                'enum': list(INDEX_KEYS),
-                'description': '지표 식별자.',
-            },
+    # 지표는 배열이 아니라 키마다 한 칸씩 둔 객체다. required + additionalProperties:false 라
+    # 모델이 지표를 빼먹거나 두 번 쓰는 것을 스키마 단계에서 막는다(배열이었을 때 실제로 일어났다).
+    # 저장·화면은 종전대로 [{key, meaning, reading}] 목록을 쓴다(validate_report 가 바꿔 준다).
+    'indices': _obj({
+        key: _obj({
             'meaning': _str('이 지표가 무엇을 뜻하는지 쉬운 말로 1~2문장.'),
             'reading': _str('이 지표를 읽는 방법 1~2문장(판정 구간, 짧은 측정의 한계). 전·후 변화는 쓰지 않는다.'),
-        }),
-    },
+        }, description='%s 설명.' % INDEX_LABELS[key])
+        for key in INDEX_KEYS
+    }, description='세 지표 각각에 대한 설명. 세 칸 모두 채운다.'),
     'tips': _str_list('일상에서 바로 해볼 수 있는 수면·이완 팁 3~5개.', '한두 문장의 실천 팁.'),
     'closing': _str('마무리 인사 한두 문장.'),
 })
@@ -209,6 +205,21 @@ def _list(obj, key):
     return value
 
 
+def _indices_as_list(data):
+    """indices 를 [{key, meaning, reading}] 목록으로.
+
+    모델 출력(스키마)은 {sleep_index: {...}, ...} 객체이고, 저장된 리포트(예전 출력 포함)는 목록이다.
+    둘 다 받아 목록으로 맞춘다. 객체일 때 순서는 INDEX_KEYS 를 따르고, 모르는 키는 그대로 넘겨
+    아래에서 '알 수 없는 지표' 로 걸린다.
+    """
+    value = data.get('indices')
+    if isinstance(value, dict):
+        ordered = [key for key in INDEX_KEYS if key in value] + [key for key in value if key not in INDEX_KEYS]
+        return [dict(value[key], key=key) if isinstance(value[key], dict) else {'key': key}
+                for key in ordered]
+    return _list(data, 'indices')
+
+
 def _string_items(data, key, strict=False, optional=False):
     """문자열 목록 칸(tips, caveats). 느슨한 검사에서는 빈 항목을 빼고, optional 이면 칸이 없어도 [] 로 둔다."""
     value = data.get(key)
@@ -260,7 +271,7 @@ def validate_report(data, strict=False):
         raise ReportInvalid('survey_insights 비어 있음')
 
     by_key = {}
-    for i, item in enumerate(_list(data, 'indices')):
+    for i, item in enumerate(_indices_as_list(data)):
         where = 'indices[%d]' % i
         key = _text(item, 'key', where)
         if key not in INDEX_KEYS:
