@@ -31,6 +31,8 @@ TOKEN_COOKIE_MAX_AGE = 12 * 60 * 60     # 12시간: 부스 운영 하루를 넘�
 #   (report.call_claude 가 스트림을 여는 재시도까지 마감 안에서만 한다).
 # 멈춤 판정은 그보다 길어야 살아 있는 워커의 작업을 다른 워커가 가져가 Claude 를 두 번 부르지 않고,
 # 운영 uWSGI harakiri(480초)보다 짧아야 워커가 죽었을 때 회수가 된다.
+# 형식 오류 자동 재시도(report.AUTO_RETRY_TOTAL_BUDGET_SEC)는 두 호출의 마감 합계를 멈춤 판정 - 80초로
+# 묶어 이 관계를 지킨다. 시간당·평생 상한은 claim 단위라 자동 재시도까지 치면 호출 수는 최대 2배다.
 REPORT_DEADLINE_MAX_SEC = 200
 STALE_GENERATING_SEC = 300
 MAX_REPORT_ATTEMPTS = 5                 # 같은 설문·측정으로 시도할 수 있는 횟수. 넘기면 failed 로 멈춘다

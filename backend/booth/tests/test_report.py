@@ -432,9 +432,12 @@ class GenerateReportTests(ReportDbTestCase):
         self.assertIn('최대 토큰', self.reload(p).report_error)
 
     def test_invalid_json_is_failed(self):
+        # JSON 아님도 형식 오류라 한 번 자동 재시도한 뒤 실패한다
         p = self.ready()
-        status, _ = self.generate(p, return_value=fake_message(content=[text_block('리포트입니다 {')]))
+        status, call = self.generate(p, return_value=fake_message(content=[text_block('리포트입니다 {')]))
         self.assertEqual(status, Status.FAILED)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[1].kwargs['retry_hint'], 'AI 출력을 JSON 으로 해석하지 못했습니다.')
         self.assertIn('JSON', self.reload(p).report_error)
 
     def test_schema_mismatch_is_failed(self):
@@ -461,6 +464,7 @@ class GenerateReportTests(ReportDbTestCase):
             fake_message(content=[text_block(json.dumps(broken))]), fake_message()])
         self.assertEqual(status, Status.DONE)
         self.assertEqual(call.call_count, 2)
+        self.assertNotIn('retry_hint', call.call_args_list[0].kwargs)
         second = call.call_args_list[1]
         self.assertEqual(second.kwargs['retry_hint'], 'AI 출력 형식 오류: tips 누락')
         self.assertGreaterEqual(second.kwargs['deadline_sec'], report.AUTO_RETRY_MIN_DEADLINE_SEC)
@@ -487,20 +491,74 @@ class GenerateReportTests(ReportDbTestCase):
         self.assertEqual(self.reload(p).report_error, 'AI 출력 형식 오류: tips 누락')
 
     def test_auto_retry_deadline_budget(self):
+        # 예산 220 = 멈춤 판정 300 - 읽기 60 - 연결 10 - 여유 10. 두 호출의 마감 합계가 이 안에 있어야
+        # 두 번째 호출이 읽기·연결 시간을 더 넘겨도 살아 있는 워커가 멈춤 판정을 넘지 않는다.
+        self.assertEqual(report.AUTO_RETRY_TOTAL_BUDGET_SEC, 220)
         with mock.patch.dict(os.environ, {'BOOTH_REPORT_DEADLINE_SEC': '150'}):
             self.assertEqual(report._auto_retry_deadline_sec(50), 150)
-            self.assertEqual(report._auto_retry_deadline_sec(200), 100)
-            self.assertIsNone(report._auto_retry_deadline_sec(245))
+            self.assertEqual(report._auto_retry_deadline_sec(100), 120)
+            self.assertEqual(report._auto_retry_deadline_sec(160), 60)
+            self.assertIsNone(report._auto_retry_deadline_sec(161))
             self.assertIsNone(report._auto_retry_deadline_sec(400))
         self.assertTrue(report._is_format_error('AI 출력 형식 오류: tips 누락'))
         self.assertTrue(report._is_format_error('AI 출력을 JSON 으로 해석하지 못했습니다.'))
+        self.assertTrue(report._is_format_error('AI 응답에 텍스트가 없습니다.'))
         self.assertFalse(report._is_format_error('AI 거절(other)'))
+        self.assertFalse(report._is_format_error('AI 출력이 최대 토큰 수에서 잘렸습니다.'))
         self.assertFalse(report._is_format_error(''))
 
-    def test_no_text_block_is_failed(self):
+    def test_payload_build_error_is_recorded_as_failed(self):
+        # 자료 조립 예외도 generating 에 남기지 않고 failed 로 기록한다(멈춤 판정까지 기다리지 않게).
         p = self.ready()
-        status, _ = self.generate(p, return_value=fake_message(content=[SimpleNamespace(type='thinking')]))
+        with mock.patch('booth.report.build_user_payload', side_effect=KeyError('boom')):
+            status, call = self.generate(p, return_value=fake_message())
         self.assertEqual(status, Status.FAILED)
+        self.assertFalse(call.called)
+        fresh = self.reload(p)
+        self.assertEqual(fresh.report_error, '리포트 생성 오류(KeyError)')
+        self.assertEqual(fresh.report_attempts, 1)
+
+    def test_exception_during_auto_retry_is_failed(self):
+        p = self.ready()
+        broken = dict(EXAMPLE_REPORT)
+        del broken['tips']
+        timeout = anthropic.APITimeoutError(request=httpx.Request('POST', 'http://booth-test.invalid'))
+        with self.assertLogs('booth.report', 'INFO') as logs:
+            status, call = self.generate(p, side_effect=[
+                fake_message(content=[text_block(json.dumps(broken))]), timeout])
+        self.assertEqual(status, Status.FAILED)
+        self.assertEqual(call.call_count, 2)
+        fresh = self.reload(p)
+        self.assertEqual(fresh.report_error, 'AI 응답 시간 초과')
+        self.assertEqual(fresh.report_attempts, 1)
+        joined = '\n'.join(logs.output)
+        self.assertIn('첫 호출 model=claude-opus-5', joined)            # 첫 응답의 사용량은 재시도 경고에
+        self.assertIn('auto_retry=True', joined)
+        self.assertIn('model=None stop_reason=None', joined)         # 결과 줄은 두 번째 호출(예외) 기준
+
+    def test_auto_retry_skipped_when_claim_was_lost_during_first_call(self):
+        p = self.ready()
+        broken = dict(EXAMPLE_REPORT)
+        del broken['tips']
+
+        def replace_then_break(system, payload):
+            other = Participant.objects.using('booth').get(pk=p.pk)
+            services.apply_measurement(
+                other, services.validate_measurement(measurement_payload(before=side(heart_rate=90))),
+                overwrite=True)
+            return fake_message(content=[text_block(json.dumps(broken))])
+
+        status, call = self.generate(p, side_effect=replace_then_break)
+        self.assertEqual(call.call_count, 1)                           # 버려질 결과에 두 번째 호출을 쓰지 않는다
+        self.assertEqual(status, Status.PENDING)
+
+    def test_no_text_block_is_failed(self):
+        # 텍스트 블록 없음도 형식 오류라 한 번 자동 재시도한 뒤 실패한다
+        p = self.ready()
+        status, call = self.generate(p, return_value=fake_message(content=[SimpleNamespace(type='thinking')]))
+        self.assertEqual(status, Status.FAILED)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[1].kwargs['retry_hint'], 'AI 응답에 텍스트가 없습니다.')
         self.assertIn('텍스트', self.reload(p).report_error)
 
     def test_exception_message_is_not_stored(self):
@@ -603,6 +661,20 @@ class CallClaudeTests(CleanEnvMixin, SimpleTestCase):
         self.assertIsInstance(kwargs['timeout'], httpx.Timeout)
         stream_kwargs = ctor.return_value.beta.messages.stream.call_args.kwargs
         self.assertEqual(stream_kwargs, report.build_request('SYS', {'survey_answers': {}}))
+
+    def test_retry_hint_and_deadline_reach_client_and_request(self):
+        stream = FakeStream(events=[SimpleNamespace(type='message_start'), SimpleNamespace(type='message_stop')],
+                            message=fake_message())
+        with mock.patch('booth.report.anthropic.Anthropic', return_value=fake_client(stream)) as ctor:
+            report.call_claude('SYS', {'survey_answers': {}}, retry_hint='HINT-XYZ', deadline_sec=30)
+        self.assertEqual(ctor.call_args.kwargs['timeout'].read, 30.0)      # 줄어든 마감이 읽기 타임아웃에도
+        stream_kwargs = ctor.return_value.beta.messages.stream.call_args.kwargs
+        self.assertEqual(stream_kwargs, report.build_request('SYS', {'survey_answers': {}}, 'HINT-XYZ'))
+        content = stream_kwargs['messages'][0]['content']
+        self.assertIn('[다시 작성]', content)
+        self.assertTrue(content.endswith('처음부터 다시 작성한다.'))
+        self.assertIn('HINT-XYZ', content)
+        self.assertNotIn('[다시 작성]', report.build_request('SYS', {'a': 1})['messages'][0]['content'])
 
     def test_missing_api_key(self):
         with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': ''}), \

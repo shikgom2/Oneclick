@@ -6,8 +6,10 @@ REPORT_SCHEMA 는 Claude structured outputs(output_config.format = json_schema)�
   - 사용 가능: type, properties, required, items, enum, const, anyOf, allOf, description,
     additionalProperties: false (모든 object 에 필수)
   - 사용 불가: minimum/maximum, minLength/maxLength, pattern, 복잡한 배열 제약
-minItems 는 SDK 의 스키마 변환기가 0/1 만 남기고 나머지를 버리므로 1 만 쓴다.
-글자 수·중복 금지는 스키마로 강제할 수 없어 프롬프트 지시와 validate_report(strict=True)로 대신한다.
+이 dict 스키마는 client.beta.messages.stream(output_config=...) 에 그대로 실려 간다(SDK 는 dict 스키마를
+변환하지 않는다). 그러므로 minLength 같은 미지원 키워드를 넣으면 걸러지지 않고 API 400 이 난다. minItems 는 0/1 만.
+글자 수·빈 문장·중복 금지는 스키마로 강제할 수 없어 프롬프트 지시와 validate_report(strict=True)로 대신하고,
+걸리면 report.generate_report 가 한 번 자동 재시도한다. 지표 누락·중복은 indices 를 필수 키 객체로 받아 스키마에서 막는다.
 
 속성 순서는 화면 순서와 같다. 모델은 대체로 속성 순서대로 써 내려가므로, 설문 풀이 -> 측정 풀이 -> 지표 -> 팁 순으로
 앞에서 인용한 값을 뒤에서 이어 쓰기 쉽다.
@@ -206,7 +208,7 @@ def _list(obj, key):
 
 
 def _indices_as_list(data):
-    """indices 를 [{key, meaning, reading}] 목록으로.
+    """indices 를 ([{key, meaning, reading}] 목록, 객체형이었는지) 로.
 
     모델 출력(스키마)은 {sleep_index: {...}, ...} 객체이고, 저장된 리포트(예전 출력 포함)는 목록이다.
     둘 다 받아 목록으로 맞춘다. 객체일 때 순서는 INDEX_KEYS 를 따르고, 모르는 키는 그대로 넘겨
@@ -216,8 +218,8 @@ def _indices_as_list(data):
     if isinstance(value, dict):
         ordered = [key for key in INDEX_KEYS if key in value] + [key for key in value if key not in INDEX_KEYS]
         return [dict(value[key], key=key) if isinstance(value[key], dict) else {'key': key}
-                for key in ordered]
-    return _list(data, 'indices')
+                for key in ordered], True
+    return _list(data, 'indices'), False
 
 
 def _string_items(data, key, strict=False, optional=False):
@@ -271,9 +273,12 @@ def validate_report(data, strict=False):
         raise ReportInvalid('survey_insights 비어 있음')
 
     by_key = {}
-    for i, item in enumerate(_indices_as_list(data)):
+    items, from_dict = _indices_as_list(data)
+    for i, item in enumerate(items):
         where = 'indices[%d]' % i
         key = _text(item, 'key', where)
+        if from_dict and key in INDEX_KEYS:
+            where = 'indices.%s' % key       # 모델 출력(객체형) 기준 경로라 재시도 힌트가 바로 가리킨다
         if key not in INDEX_KEYS:
             raise ReportInvalid('%s.key 값이 알 수 없는 지표' % where)
         if key in by_key:

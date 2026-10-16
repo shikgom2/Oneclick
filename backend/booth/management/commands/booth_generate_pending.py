@@ -10,7 +10,8 @@
     python manage.py booth_generate_pending --dry-run
 
 출력에는 참가자 번호와 상태만 쓰고 이름은 쓰지 않는다. 한 명당 최대
-BOOTH_REPORT_DEADLINE_SEC 초가 걸릴 수 있으므로 --limit 으로 한 번에 처리할 인원을 제한한다.
+BOOTH_REPORT_DEADLINE_SEC 초(형식 오류 자동 재시도가 끼면 두 호출 합계 220초)가 걸릴 수 있으므로
+--limit 으로 한 번에 처리할 인원을 제한한다.
 이 명령도 동시 생성 상한(BOOTH_MAX_CONCURRENT_REPORTS)을 따른다. 웹 워커가 상한만큼 생성 중이면
 그 사람은 pending 으로 남고 '기타'로 센다(나중에 다시 실행). 시도 한도를 다 쓴 사람은 대상이
 아니다. 스태프 확인 뒤 booth_reset_report 로 초기화한다.

@@ -12,6 +12,8 @@
      보정이 들어 있어, 전·후 숫자나 방향을 문장에 쓰면 곧 '자극 효과' 주장이 된다. 전·후 표는 서버가 그린다.
   3. Claude 호출: 스트리밍 + 마감 시간. 스트림을 여는 재시도까지 마감 안에서만 해서 워커 수명을
      '마감 + 읽기 타임아웃'(최대 270초) 안으로 묶는다. 멈춤 판정(300초)·harakiri(480초)보다 짧다.
+     형식 오류면 같은 claim 안에서 한 번 자동 재시도하되, 두 호출의 마감 합계를 AUTO_RETRY_TOTAL_BUDGET_SEC
+     (220초)로 묶어 재시도 뒤에도 수명이 멈춤 판정을 넘지 않게 한다.
   4. 결과 저장: '내가 claim 한 그 generating' 일 때만 쓰는 조건부 UPDATE. 생성 중에 설문·측정이
      바뀌었거나(상태가 pending 으로 돌아감) 다른 워커가 멈춘 작업을 다시 가져간 경우
      (report_started_at 이 달라짐) 이 워커의 결과는 버린다. 옛 데이터로 만든 리포트가
@@ -59,9 +61,14 @@ _ERROR_NO_API_KEY = '서버에 ANTHROPIC_API_KEY 가 설정되어 있지 않습�
 _ERROR_EXHAUSTED = '리포트 생성 시도 횟수(%d회)를 모두 사용했습니다.' % conf.MAX_REPORT_ATTEMPTS
 _ERROR_NAME_TITLE = '이름 문항 설정 오류로 리포트를 만들지 않았습니다(BOOTH_SURVEY_NAME_TITLE 확인).'
 
-# 형식 오류(빈 문장·지표 누락·JSON 아님) 자동 재시도. 두 호출을 합쳐 이 시간 안에 끝내야
-# 워커 수명(마감 + 읽기 60 + 연결 10 < uwsgi harakiri 480)을 넘기지 않는다.
-AUTO_RETRY_TOTAL_BUDGET_SEC = 300
+# 형식 오류(빈 문장·지표 누락·JSON 아님) 자동 재시도.
+# 두 호출의 '마감' 합계 예산. 두 번째 호출도 마감 뒤 읽기 60 + 연결 10 초를 더 넘길 수 있고,
+# started 는 claim(report_started_at)보다 조금 뒤이므로 여유 10초를 더 뺀다. 그래야 살아 있는
+# 워커의 수명이 멈춤 판정(STALE_GENERATING_SEC)을 넘지 않아 다른 워커가 같은 참가자를 다시 가져가
+# Claude 를 세 번 부르는 일이 없다(300 - 60 - 10 - 10 = 220). harakiri 480 은 그보다 훨씬 길다.
+AUTO_RETRY_SLACK_SEC = 10
+AUTO_RETRY_TOTAL_BUDGET_SEC = (conf.STALE_GENERATING_SEC - READ_TIMEOUT_SEC - CONNECT_TIMEOUT_SEC
+                               - AUTO_RETRY_SLACK_SEC)
 AUTO_RETRY_MIN_DEADLINE_SEC = 60
 _FORMAT_ERROR_PREFIXES = ('AI 출력 형식 오류', 'AI 출력을 JSON', 'AI 응답에 텍스트가 없습니다')
 
@@ -75,6 +82,13 @@ def _auto_retry_deadline_sec(elapsed):
     """첫 호출이 elapsed 초 걸렸을 때 자동 재시도 호출에 줄 마감(초). 남은 시간이 짧으면 None(재시도 안 함)."""
     deadline = min(conf.report_deadline_sec(), AUTO_RETRY_TOTAL_BUDGET_SEC - elapsed)
     return deadline if deadline >= AUTO_RETRY_MIN_DEADLINE_SEC else None
+
+
+def _still_claimed(participant_id, claimed_at):
+    """내가 claim 한 generating 이 아직 내 것인지(자료가 바뀌면 pending, 다른 워커가 가져가면 started_at 이 달라짐)."""
+    return (Participant.objects.using(BOOTH_DB)
+            .filter(pk=participant_id, report_status=Status.GENERATING, report_started_at=claimed_at)
+            .exists())
 
 
 class ReportGenerationError(Exception):
@@ -418,7 +432,7 @@ def build_user_message(user_payload, retry_hint=None):
         # 자동 재시도: 직전 출력이 왜 버려졌는지 알려 같은 실수를 되풀이하지 않게 한다.
         # 오류 문구는 validate_report 가 만든 것이라 개인정보가 없다.
         message += (
-            '\n\n[다시 작성] 직전 출력은 형식 검증에 실패해 버려졌다: %s\n'
+            '\n\n[다시 작성] 이 자료로 만든 이전 시도의 출력이 형식 검증에 실패했다: %s\n'
             '모든 문장 칸을 빈 문자열 없이 채우고, indices 의 세 지표를 모두 넣어 처음부터 다시 작성한다.'
             % retry_hint
         )
@@ -724,25 +738,32 @@ def generate_report(participant):
         return _sync_from_db(participant)
 
     started = monotonic()
-    user_payload = build_user_payload(fresh)
     message = None
     retried = False
     try:
+        user_payload = build_user_payload(fresh)      # 예외도 아래에서 failed 로 기록한다
         message = call_claude(SYSTEM_PROMPT, user_payload)
         report, error = interpret_message(message)
         if report is None and _is_format_error(error):
             # 모델이 스키마는 지켰지만 빈 문장·누락 같은 검증에 걸린 경우. 관람객이 실패 화면을 보고
-            # 다시 누르기 전에 서버가 한 번 더 시도한다. 마감은 두 호출을 합쳐 워커 수명 안에 둔다.
+            # 다시 누르기 전에 서버가 한 번 더 시도한다. 마감은 두 호출을 합쳐 멈춤 판정 안에 둔다.
             retry_deadline = _auto_retry_deadline_sec(monotonic() - started)
-            if retry_deadline is not None:
-                logger.warning('[booth] 리포트 %s 형식 오류 → 자동 재시도 (마감 %.0f초): %s',
-                               label, retry_deadline, error)
+            if retry_deadline is None:
+                logger.warning('[booth] 리포트 %s 형식 오류지만 남은 시간이 없어 자동 재시도 생략: %s', label, error)
+            elif not _still_claimed(participant.pk, claimed_at):
+                # 첫 호출 중에 설문·측정이 바뀌었거나 다른 워커가 가져갔다. 어차피 버려질 결과에 쓰지 않는다.
+                logger.info('[booth] 리포트 %s 형식 오류, 그 사이 자료가 바뀌어 자동 재시도 생략', label)
+            else:
+                first_in, first_out, _ = _usage_summary(message)
+                logger.warning('[booth] 리포트 %s 형식 오류 → 자동 재시도 (마감 %.0f초) 첫 호출 model=%s '
+                               'stop_reason=%s in=%s out=%s: %s', label, retry_deadline,
+                               getattr(message, 'model', None), getattr(message, 'stop_reason', None),
+                               first_in, first_out, error)
                 retried = True
+                message = None                        # 결과 로그가 첫 응답을 두 번째 것처럼 보이지 않게
                 message = call_claude(SYSTEM_PROMPT, user_payload, retry_hint=error,
                                       deadline_sec=retry_deadline)
                 report, error = interpret_message(message)
-            else:
-                logger.warning('[booth] 리포트 %s 형식 오류지만 남은 시간이 없어 자동 재시도 생략', label)
     except Exception as exc:
         report, error = None, describe_exception(exc)
         if isinstance(exc, TypeError):

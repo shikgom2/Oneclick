@@ -187,6 +187,15 @@ class TimingInvariantTests(SimpleTestCase):
         self.assertGreater(conf.STALE_GENERATING_SEC, worker_lifetime)
         self.assertLess(conf.STALE_GENERATING_SEC, UWSGI_HARAKIRI_SEC)
 
+    def test_auto_retry_budget_keeps_live_worker_below_stale_limit(self):
+        # 형식 오류 자동 재시도: 두 호출의 마감 합계 + 두 번째 호출의 읽기·연결 초과 + claim→시작 여유 < 멈춤 판정.
+        worst = (report.AUTO_RETRY_TOTAL_BUDGET_SEC + report.READ_TIMEOUT_SEC + report.CONNECT_TIMEOUT_SEC
+                 + report.AUTO_RETRY_SLACK_SEC)
+        self.assertLessEqual(worst, conf.STALE_GENERATING_SEC)
+        self.assertLess(worst, UWSGI_HARAKIRI_SEC)
+        with booth_env():
+            self.assertLessEqual(report.AUTO_RETRY_MIN_DEADLINE_SEC, conf.report_deadline_sec())
+
     def test_deadline_above_max_falls_back_to_default(self):
         with booth_env(BOOTH_REPORT_DEADLINE_SEC=str(conf.REPORT_DEADLINE_MAX_SEC + 1)):
             with self.assertLogs('booth.conf', 'WARNING'):
@@ -577,6 +586,11 @@ class StrictReportValidationTests(SimpleTestCase):
         data['indices'] = {key: items[key] for key in reversed(INDEX_KEYS)}
         result = validate_report(data, strict=True)
         self.assertEqual(result['indices'], EXAMPLE_REPORT['indices'])
+        # 객체형 입력의 오류 경로는 모델 출력 기준(indices.<키>)이라 재시도 힌트가 바로 가리킨다
+        data['indices']['autonomic_balance'] = dict(items['autonomic_balance'], meaning='')
+        with self.assertRaises(ReportInvalid) as ctx:
+            validate_report(data, strict=True)
+        self.assertEqual(str(ctx.exception), 'indices.autonomic_balance.meaning 비어 있음')
         data['indices'].pop('autonomic_balance')
         with self.assertRaises(ReportInvalid):
             validate_report(data, strict=True)
