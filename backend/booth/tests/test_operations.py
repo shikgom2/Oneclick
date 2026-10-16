@@ -457,7 +457,7 @@ class DeployCheckTests(CleanEnvMixin, SimpleTestCase):
 
     def test_clean_production_like_configuration_has_no_warnings(self):
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f',
-                       BOOTH_PUBLIC_BASE_URL='https://180.83.245.145',
+                       BOOTH_PUBLIC_BASE_URL='https://163.152.155.234',
                        BOOTH_FORM_URL='https://docs.google.com/forms/d/e/X/viewform',
                        BOOTH_FORM_NUMBER_ENTRY='entry.1'):
             self.assertEqual(self.ids(), set())
@@ -479,7 +479,7 @@ class DeployCheckTests(CleanEnvMixin, SimpleTestCase):
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f'):
             self.assertIn('booth.W001', self.ids(inside))
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k', BOOTH_FORM_API_KEY='f',
-                       BOOTH_PUBLIC_BASE_URL='http://180.83.245.145:8000'):
+                       BOOTH_PUBLIC_BASE_URL='http://163.152.155.234:8000'):
             self.assertIn('booth.W002', self.ids())
         with booth_env(BOOTH_ALLOW_INSECURE=None, BOOTH_API_KEY='k'):
             self.assertIn('booth.W003', self.ids())

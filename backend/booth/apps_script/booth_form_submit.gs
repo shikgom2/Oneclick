@@ -5,7 +5,7 @@
  * 프로젝트에 이 파일 내용을 그대로 붙여 넣는다. 전체 절차는 backend/booth/README.md 참고.
  *
  * 스크립트 속성 (프로젝트 설정 > 스크립트 속성)
- *   BOOTH_BASE_URL        서버 주소. https:// 만 받는다. 예: https://180.83.245.145  (끝의 '/' 는 있어도 된다)
+ *   BOOTH_BASE_URL        서버 주소. https:// 만 받는다. 예: https://163.152.155.234  (끝의 '/' 는 있어도 된다)
  *                         이름·건강 설문 응답을 보내므로 평문 http 주소(:8000 등)는 설정 오류로 막는다.
  *   BOOTH_FORM_API_KEY    서버 env BOOTH_FORM_API_KEY 와 같은 값(설문 수신 전용 키).
  *                         (예전 속성 이름 BOOTH_API_KEY 도 읽는다.)
