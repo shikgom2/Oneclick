@@ -127,13 +127,13 @@ class ReportUrlSchemeTests(PageTestCase):
         path = '/booth/p/%s/' % p.token
         http_request = RequestFactory().get('/booth/api/measurement/')
         https_request = RequestFactory().get('/booth/api/measurement/', secure=True)
-        with insecure_env(BOOTH_PUBLIC_BASE_URL='http://163.152.155.234:8000'):
+        with insecure_env(BOOTH_PUBLIC_BASE_URL='https://ntxoneclick.co.kr'):
             with self.assertLogs('booth.services', 'ERROR'):
                 self.assertEqual(services.build_report_url(p, https_request), 'https://testserver' + path)
             with self.assertLogs('booth.services', 'ERROR'):
                 self.assertEqual(services.build_report_url(p, http_request), '')
-        with insecure_env(BOOTH_PUBLIC_BASE_URL='https://163.152.155.234/'):
-            self.assertEqual(services.build_report_url(p, http_request), 'https://163.152.155.234' + path)
+        with insecure_env(BOOTH_PUBLIC_BASE_URL='https://ntxoneclick.co.kr/'):
+            self.assertEqual(services.build_report_url(p, http_request), 'https://ntxoneclick.co.kr' + path)
 
 
 # ---------------------------------------------------------------------------

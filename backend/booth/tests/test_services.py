@@ -559,8 +559,8 @@ class LookupTests(BoothDbTestCase):
         self.assertEqual(services.build_report_url(p), path)
         request = RequestFactory().get('/booth/api/measurement/')
         self.assertEqual(services.build_report_url(p, request), 'http://testserver' + path)
-        with booth_env(BOOTH_PUBLIC_BASE_URL='https://163.152.155.234/'):
-            self.assertEqual(services.build_report_url(p, request), 'https://163.152.155.234' + path)
+        with booth_env(BOOTH_PUBLIC_BASE_URL='https://ntxoneclick.co.kr/'):
+            self.assertEqual(services.build_report_url(p, request), 'https://ntxoneclick.co.kr' + path)
 
     def test_deletion_date_is_kst(self):
         p = services.issue_participant('phone')

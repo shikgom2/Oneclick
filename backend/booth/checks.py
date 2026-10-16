@@ -74,7 +74,7 @@ def booth_deploy_check(app_configs, **kwargs):
     if base_url and not base_url.lower().startswith('https://'):
         warnings.append(Warning(
             'BOOTH_PUBLIC_BASE_URL 이 https:// 로 시작하지 않아 쓰이지 않습니다.',
-            hint='예: BOOTH_PUBLIC_BASE_URL=https://163.152.155.234',
+            hint='예: BOOTH_PUBLIC_BASE_URL=https://ntxoneclick.co.kr',
             id='booth.W002',
         ))
     if conf.api_key() and not conf.form_api_key():

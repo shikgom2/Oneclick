@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """부스 인쇄용 QR 포스터 생성.
 
-    python make_qr_poster.py --base https://163.152.155.234 --out poster.png
+    python make_qr_poster.py --base https://ntxoneclick.co.kr --out poster.png
 
 QR 의 목적지는 <base>/booth/start/ (README 8. 휴대폰으로 참여). 서버 주소가 바뀌면
 이 스크립트로 다시 만들어 인쇄한다. A4 비율 300 dpi PNG 와 같은 이름의 PDF 를 쓴다.

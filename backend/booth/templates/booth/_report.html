@@ -65,7 +65,6 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
     <h2>체험 전·후 값</h2>
     <div class="table-wrap">
       <table class="cmp">
-        <caption>{{ caption }}</caption>
         <thead><tr><th scope="col">항목</th><th scope="col">체험 전</th><th scope="col">체험 후</th></tr></thead>
         <tbody>
         {% for row in rows %}
@@ -76,9 +75,9 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
     </div>
     {# 표시값(보정 포함)이든 원 측정값이든 전·후 차이를 효과로 읽지 않도록 항상 알린다. #}
     {% if is_displayed %}
-    <p class="muted small">체험 화면의 값에는 시연을 위한 보정이 들어 있어, 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다.</p>
+    <p class="muted small">짧은 체험 중 한 번 측정한 값이라 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다.</p>
     {% else %}
-    <p class="muted small">짧은 체험 중 한 번 측정한 값이라 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다. 체험 화면에 보였던 값(시연용 보정 포함)과 다를 수 있습니다.</p>
+    <p class="muted small">짧은 체험 중 한 번 측정한 값이라 전·후 차이를 개인의 변화나 자극의 효과로 볼 수 없습니다.</p>
     {% endif %}
   </section>
 
@@ -94,8 +93,6 @@ caveats)이 없는 예전 리포트는 그 칸만 건너뛰고 그린다. ({# #}
       {% endif %}
     </div>
     {% endfor %}
-    {# '내 값'은 위 전·후 표와 같은 값이다. 출처(표시값이면 시연용 보정 포함)와 효과로 볼 수 없다는 점을 한 번 알린다. #}
-    {% if own_note %}<p class="muted small">{{ own_note }}</p>{% endif %}
   </section>
 
   <section class="card">

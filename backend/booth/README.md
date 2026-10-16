@@ -4,7 +4,7 @@
 참가자 번호로 설문과 측정을 묶어 Claude 로 짧은 한국어 리포트를 만들어 관람객 휴대폰에 보여준다.
 
 - 서버: `163.152.155.234` (Ubuntu 22.04, nginx → uWSGI 5 프로세스, harakiri 480초). 코드는 `/home/brainlab/Workspace/Oneclick`.
-- 공개 주소: **`https://163.152.155.234/booth/`** (443, Let's Encrypt IP 인증서, `/booth/` 만 서비스). 인쇄 QR 은 `https://163.152.155.234/booth/start/` (찍으면 번호·확인 코드가 채워진 구글 폼이 바로 열린다).
+- 공개 주소: **`https://ntxoneclick.co.kr/booth/`** (443, Let's Encrypt IP 인증서, `/booth/` 만 서비스). 인쇄 QR 은 `https://ntxoneclick.co.kr/booth/start/` (찍으면 번호·확인 코드가 채워진 구글 폼이 바로 열린다).
 - 저장소: 운영 MySQL 이 아니라 **booth 전용 SQLite** (`BOOTH_DB_PATH`). 보유기간(기본 14일)이 지나면 행째로 삭제.
 - 인증: 사람용 페이지는 URL 의 토큰이 권한, 기기용 API 는 `X-Booth-Key` (태블릿 키·폼 키 분리).
 - **https 로 들어온 요청만 처리한다.** 평문 http(포트 8000 등)로 온 booth 요청은 403 으로 거부한다.
@@ -105,7 +105,7 @@ uWSGI ini 의 `env =` 에는 넣지 않는다(이미 있는 값은 `.env` 가 �
 | `BOOTH_API_KEY` | (없음) | **태블릿 키**. 체험 태블릿 앱이 `X-Booth-Key` 로 보낸다(대기 목록·측정·상태·측정 취소). 비어 있으면 그 API 는 503. 생성: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `BOOTH_FORM_API_KEY` | (없음) | **폼 키**. Apps Script 전용, 설문 수신만. 비어 있으면 설문 수신도 태블릿 키로 받는다(경고 booth.W003) |
 | `BOOTH_DB_PATH` | `backend/booth.sqlite3` | booth SQLite 파일 경로. **반드시 backend 폴더 밖** (`/var/lib/oneclick-booth/booth.sqlite3`). 폴더 안이면 경고 booth.W001 |
-| `BOOTH_PUBLIC_BASE_URL` | (없음) | `report_url`(QR) 의 기준 주소. `https://163.152.155.234`. `https://` 가 아니면 쓰지 않는다(경고 booth.W002) |
+| `BOOTH_PUBLIC_BASE_URL` | (없음) | `report_url`(QR) 의 기준 주소. `https://ntxoneclick.co.kr`. `https://` 가 아니면 쓰지 않는다(경고 booth.W002) |
 | `BOOTH_FORM_URL` | (없음) | 구글 폼 응답 주소 `https://docs.google.com/forms/d/e/<ID>/viewform`. 없거나 http(s) 주소로 해석되지 않으면(`https://[` 같은 오타 포함) 인쇄 QR 이 폼 대신 개인 페이지를 열고, 그 페이지의 설문하기와 키오스크가 '설문 주소 미설정' 안내(503) |
 | `BOOTH_FORM_NUMBER_ENTRY` | (없음) | 번호 문항의 미리 채우기 파라미터 `entry.123456789` (숫자만 넣어도 됨). **반드시 설정**: 인쇄 QR 이 폼을 바로 열어 휴대폰 체험자는 번호를 따로 볼 화면이 없다. `BOOTH_FORM_URL` 만 있고 이 값이 없으면 인쇄 QR 은 폼 대신 번호가 보이는 개인 페이지를 연다(경고 booth.W005) |
 | `BOOTH_FORM_CODE_ENTRY` | (없음) | 확인 코드 문항의 미리 채우기 파라미터. **설정하면 코드 없는 설문 제출을 400 으로 거부**한다(운영 권장) |
@@ -241,7 +241,7 @@ _booth_logging.setdefault('loggers', {})['booth'] = {
 BOOTH_API_KEY=<태블릿 키>
 BOOTH_FORM_API_KEY=<폼 키>
 BOOTH_DB_PATH=/var/lib/oneclick-booth/booth.sqlite3
-BOOTH_PUBLIC_BASE_URL=https://163.152.155.234
+BOOTH_PUBLIC_BASE_URL=https://ntxoneclick.co.kr
 BOOTH_FORM_URL=https://docs.google.com/forms/d/e/<ID>/viewform
 BOOTH_FORM_NUMBER_ENTRY=entry.<번호 문항 id>
 BOOTH_FORM_CODE_ENTRY=entry.<확인 코드 문항 id>
@@ -306,7 +306,7 @@ certbot --version                                          # 5.4 이상
 # webroot 가 실제로 서비스되는지 먼저 확인 (숨김 폴더 차단 규칙이 있으면 실패한다)
 sudo mkdir -p /var/www/flutter/.well-known/acme-challenge
 echo ok | sudo tee /var/www/flutter/.well-known/acme-challenge/booth-test
-curl -s http://163.152.155.234/.well-known/acme-challenge/booth-test   # -> ok
+curl -s https://ntxoneclick.co.kr/.well-known/acme-challenge/booth-test   # -> ok
 sudo rm /var/www/flutter/.well-known/acme-challenge/booth-test
 
 # 스테이징으로 시험
@@ -405,20 +405,20 @@ tail -3 /home/brainlab/booth-logs/booth_purge.log
 
 ```bash
 # 평문 8000 은 거부(403)
-curl -s -o /dev/null -w '%{http_code}\n' http://163.152.155.234:8000/booth/start/          # 403
+curl -s -o /dev/null -w '%{http_code}\n' https://ntxoneclick.co.kr/booth/start/          # 403
 # 443 은 booth 만 (다른 경로 404)
-curl -s -o /dev/null -w '%{http_code}\n' https://163.152.155.234/api/v1/                    # 404
+curl -s -o /dev/null -w '%{http_code}\n' https://ntxoneclick.co.kr/api/v1/                    # 404
 # 폼 키 확인: 빈 본문에 400 (키가 틀리면 403, 서버에 키가 없으면 503)
-curl -s -X POST https://163.152.155.234/booth/api/survey/ \
+curl -s -X POST https://ntxoneclick.co.kr/booth/api/survey/ \
      -H 'X-Booth-Key: <폼 키>' -H 'Content-Type: application/json' -d '{}'
 #    -> {"error":"number(참가자 번호)가 필요합니다."}
 # 태블릿 키 확인
-curl -s https://163.152.155.234/booth/api/pending/ -H 'X-Booth-Key: <태블릿 키>'
+curl -s https://ntxoneclick.co.kr/booth/api/pending/ -H 'X-Booth-Key: <태블릿 키>'
 ```
 
-- 브라우저로 `https://163.152.155.234/booth/kiosk/` 를 열어 '새 체험자 시작' 화면 확인
+- 브라우저로 `https://ntxoneclick.co.kr/booth/kiosk/` 를 열어 '새 체험자 시작' 화면 확인
 - uWSGI 로그에 `[booth]` 로 시작하는 줄이 보이는지 확인
-- Apps Script `BOOTH_BASE_URL=https://163.152.155.234`, 태블릿 앱 기준 주소 `https://163.152.155.234/booth/api/`
+- Apps Script `BOOTH_BASE_URL=https://ntxoneclick.co.kr`, 태블릿 앱 기준 주소 `https://ntxoneclick.co.kr/booth/api/`
 
 ### 시간 예산 (harakiri 480 기준)
 
@@ -559,7 +559,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 
    | 속성 | 값 |
    |---|---|
-   | `BOOTH_BASE_URL` | `https://163.152.155.234` (**https 만**. `http://…:8000` 은 설정 오류로 막는다) |
+   | `BOOTH_BASE_URL` | `https://ntxoneclick.co.kr` (**https 만**. `http://…:8000` 은 설정 오류로 막는다) |
    | `BOOTH_FORM_API_KEY` | 서버의 `BOOTH_FORM_API_KEY` 와 같은 값 (예전 이름 `BOOTH_API_KEY` 도 읽는다) |
    | `BOOTH_CONSENT_TITLES` | 서버 `BOOTH_SURVEY_CONSENT_TITLES` 와 같은 값 |
    | `BOOTH_NUMBER_TITLE`, `BOOTH_CODE_TITLE` | (선택) 제목이 기본값(`참가자 번호`, `확인 코드`)과 다를 때 |
@@ -599,7 +599,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 
 ### 휴대폰으로 참여
 
-1. 인쇄된 QR(`https://163.152.155.234/booth/start/`)을 찍으면 번호(예: `SF-042`)와 확인 코드가 채워진 **구글 폼이 바로 열린다**(누를 버튼 없음).
+1. 인쇄된 QR(`https://ntxoneclick.co.kr/booth/start/`)을 찍으면 번호(예: `SF-042`)와 확인 코드가 채워진 **구글 폼이 바로 열린다**(누를 버튼 없음).
    번호·확인 코드는 고치지 않고 작성해 제출한다.
 2. 제출하면 폼의 [제출 확인 메시지](#제출-확인-메시지-권장)가 "접수되었으니 부스로 오세요, 리포트는 체험 뒤 태블릿 QR 로" 를 안내한다.
 3. 부스에서 스태프가 체험 태블릿 대기 목록에서 가린 이름(`홍○동`)으로 번호를 고르고 측정·체험을 한다.
@@ -621,7 +621,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 키오스크는 **설문 작성용**이다. 리포트는 체험 태블릿의 QR 로 휴대폰에서 연다(휴대폰이 없으면 아래 스태프 절차).
 
 1. 태블릿 준비:
-   - 브라우저를 **시크릿(Incognito)·게스트 모드** 또는 기록·자동완성을 끈 키오스크 브라우저 앱으로 `https://163.152.155.234/booth/kiosk/` 를 연다.
+   - 브라우저를 **시크릿(Incognito)·게스트 모드** 또는 기록·자동완성을 끈 키오스크 브라우저 앱으로 `https://ntxoneclick.co.kr/booth/kiosk/` 를 연다.
    - 브라우저를 구글 계정에 로그인하지 않는다. **자동완성(양식 데이터 저장)을 끈다.**
    - 키보드(Gboard·삼성 키보드)의 **개인화 추천·학습을 끈다**. 끄지 않으면 앞사람의 이름이 다음 사람의 추천 단어로 뜬다.
    - Android **화면 고정(앱 고정)** 으로 주소창·방문 기록에 손이 닿지 않게 한다.
@@ -645,7 +645,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 - [ ] 휴대폰으로 인쇄 QR 을 찍으면 번호·확인 코드가 채워진 폼이 바로 열림(키오스크 폼도 동일), 제출 뒤 [제출 확인 메시지](#제출-확인-메시지-권장)가 보임,
       같은 카메라 앱(같은 브라우저)으로 QR 을 다시 찍으면 폼이 아니라 개인 페이지('설문이 접수되었습니다')가 열림, 체험 태블릿의 리포트 QR 로도 그 개인 페이지가 열림
 - [ ] 스태프 1명이 처음부터 끝까지(동의 → 측정 → 리포트) 테스트, 동의 거부 경로도 테스트
-- [ ] `http://163.152.155.234:8000/booth/start/` 가 403
+- [ ] `https://ntxoneclick.co.kr/booth/start/` 가 403
 - [ ] `booth_purge` cron 줄을 손으로 실행해 로그에 `삭제 N건`
 - [ ] HTTPS 인증서 만료일 (`sudo certbot certificates`, 약 6일짜리가 계속 갱신되는지)
 - [ ] 테스트로 만든 폼 응답을 폼 응답 탭에서 삭제
@@ -669,7 +669,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 
 ### 공통
 
-- 기준 주소: **`https://163.152.155.234/booth/api/`**. 모든 경로가 `/` 로 끝난다. `http://…:8000` 은 403.
+- 기준 주소: **`https://ntxoneclick.co.kr/booth/api/`**. 모든 경로가 `/` 로 끝난다. `http://…:8000` 은 403.
 - 헤더: `X-Booth-Key: <태블릿 키>`, POST 는 `Content-Type: application/json` (`; charset=utf-8` 가능. 다른 형식은 415)
 - Django 가 만든 응답은 `Accept` 와 무관하게 JSON 이고 오류는 `{"error": "한국어 메시지"}` 다. 다만 nginx 가 직접 내는
   502·503·504·413 은 HTML 일 수 있으니 **`Content-Type` 이 JSON 인지 확인한 뒤** 해석하고, JSON 이 아닌 5xx 는 '잠시 후 재시도'로 처리한다.
@@ -740,7 +740,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 
 ```json
 {"ok": true, "number": 42, "label": "SF-042", "masked_name": "홍○동",
- "report_status": "pending", "report_url": "https://163.152.155.234/booth/p/Qm9vdGhUb2tlbkV4YW1wbGUxMjM0/"}
+ "report_status": "pending", "report_url": "https://ntxoneclick.co.kr/booth/p/Qm9vdGhUb2tlbkV4YW1wbGUxMjM0/"}
 ```
 
 검증 규칙:
@@ -770,7 +770,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 ```json
 {"number": 42, "label": "SF-042", "masked_name": "홍○동", "survey_received": true,
  "measurement_received": true, "report_status": "generating",
- "report_url": "https://163.152.155.234/booth/p/Qm9vdGhUb2tlbkV4YW1wbGUxMjM0/"}
+ "report_url": "https://ntxoneclick.co.kr/booth/p/Qm9vdGhUb2tlbkV4YW1wbGUxMjM0/"}
 ```
 
 - `report_url` 은 **측정 수신 후 30분 동안만** 주고, 그 전·후에는 `null` 이다(키만으로 모든 참가자의 개인 페이지 주소를 모을 수 없게).
@@ -792,7 +792,7 @@ python manage.py booth_reset_report 42 --clear-measurement
 ### curl 로 확인
 
 ```bash
-KEY='<태블릿 키>'; BASE='https://163.152.155.234/booth/api'
+KEY='<태블릿 키>'; BASE='https://ntxoneclick.co.kr/booth/api'
 curl -s "$BASE/pending/" -H "X-Booth-Key: $KEY"
 curl -s -X POST "$BASE/measurement/" -H "X-Booth-Key: $KEY" -H 'Content-Type: application/json' -d @measurement.json
 curl -s "$BASE/participants/42/" -H "X-Booth-Key: $KEY"
@@ -972,7 +972,7 @@ Stress/Recovery 는 높을수록 회복 쪽), 설문 응답에 근거, 설문 �
 
 | 증상 | 확인할 것 |
 |---|---|
-| 페이지·API 가 `보안 연결(HTTPS)이 필요합니다` / `HTTPS 로만 사용할 수 있습니다.` (403) | http 주소(:8000)로 접속함. `https://163.152.155.234/booth/...` 로. 443 에서도 나면 nginx 에 `include uwsgi_params;` 가 있는지 |
+| 페이지·API 가 `보안 연결(HTTPS)이 필요합니다` / `HTTPS 로만 사용할 수 있습니다.` (403) | http 주소(:8000)로 접속함. `https://ntxoneclick.co.kr/booth/...` 로. 443 에서도 나면 nginx 에 `include uwsgi_params;` 가 있는지 |
 | 설문을 냈는데 인쇄 QR 을 다시 찍으면 폼이 또 열림 / 개인 페이지가 '설문 전' 그대로 | 다시 열린 폼의 **번호가 전과 다르면** 처음과 다른 브라우저·앱(다른 QR 스캐너 앱, 시크릿 창, 쿠키 삭제)으로 찍어 새 번호가 발급된 것이다. 제출하지 말고 체험 뒤 태블릿의 리포트 QR 을 쓴다. **번호가 같으면** 설문이 서버에 접수되지 않았다. Apps Script **실행** 목록의 `onBoothFormSubmit` 실패 사유 → `checkConnection`. 번호 칸이 비었거나 고쳐 씀(404/400), 확인 코드를 고침(400) |
 | Apps Script 로그 `확인 코드가 맞지 않습니다` (400) | 번호나 코드를 고쳐 씀. 접수되지 않았으므로 처음 연 같은 브라우저로 인쇄 QR 을 다시 찍으면 같은 번호의 폼이 다시 열린다(키오스크는 새 체험자 시작) |
 | Apps Script 로그 `이미 설문이 접수되어 있어 확인 코드 없이 덮어쓸 수 없습니다` (409) | 폼에 확인 코드 문항이 없거나 `BOOTH_FORM_CODE_ENTRY` 미설정. 6. 구글 폼 설정 |

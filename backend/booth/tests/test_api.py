@@ -497,9 +497,9 @@ class MeasurementIntakeTests(ApiTestCase):
 
     def test_report_url_uses_public_base_url(self):
         p = self.surveyed(1)
-        with mock.patch.dict(os.environ, {'BOOTH_PUBLIC_BASE_URL': 'https://163.152.155.234/'}):
+        with mock.patch.dict(os.environ, {'BOOTH_PUBLIC_BASE_URL': 'https://ntxoneclick.co.kr/'}):
             response = self.send(1)
-        self.assertEqual(response.json()['report_url'], 'https://163.152.155.234/booth/p/%s/' % p.token)
+        self.assertEqual(response.json()['report_url'], 'https://ntxoneclick.co.kr/booth/p/%s/' % p.token)
 
     def test_stored_measurement_is_normalized(self):
         p = self.surveyed(1)
