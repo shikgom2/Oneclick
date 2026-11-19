@@ -51,6 +51,18 @@ class HRVRecoverySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class HRVRecovery3Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = HRVRecovery3
+        fields = '__all__'
+
+
+class HRVRecovery4Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = HRVRecovery4
+        fields = '__all__'
+
+
 class HRVSerializer(serializers.ModelSerializer):
     pk = serializers.IntegerField(read_only=True)
     baseline = HRVBaseLineSerializer(read_only=True)
@@ -58,8 +70,12 @@ class HRVSerializer(serializers.ModelSerializer):
     recovery1 = HRVRecovery1Serializer(read_only=True)
     stimulation2 = HRVStimulation2Serializer(read_only=True)
     recovery2 = HRVRecovery2Serializer(read_only=True)
+    # phase 는 합집합의 시간 순서로 둔다 (experiments.views.CONNECTIVITY_PHASES 와 같은 순서).
+    # 세션에 없는 phase 는 키를 빼지 않고 null 로 나간다.
     stimulation3 = HRVStimulation3Serializer(read_only=True)
+    recovery3 = HRVRecovery3Serializer(read_only=True)
     stimulation4 = HRVStimulation4Serializer(read_only=True)
+    recovery4 = HRVRecovery4Serializer(read_only=True)
     recovery = HRVRecoverySerializer(read_only=True)
 
     class Meta:
@@ -74,7 +90,9 @@ class HRVSerializer(serializers.ModelSerializer):
             'stimulation2',
             'recovery2',
             'stimulation3',
+            'recovery3',
             'stimulation4',
+            'recovery4',
             'recovery',
             'note'
         )

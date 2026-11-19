@@ -250,6 +250,10 @@ class ExperimentView(APIView):
                     stimulation3=self.ecg_obj_save(HRVStimulation3, 'stimulation3', hrv_data) if hrv_data.get('stimulation3') else None,
                     stimulation4=self.ecg_obj_save(HRVStimulation4, 'stimulation4', hrv_data) if hrv_data.get('stimulation4') else None,
                     recovery=self.ecg_obj_save(HRVRecovery, 'recovery', hrv_data) if hrv_data.get('recovery') else None,
+                    # 9-phase 모드 (baseline, stim1, rec1, stim2, rec2, stim3, rec3, stim4, rec4)
+                    # 새 키는 recovery3·recovery4 뿐이다 (stimulation3·4 는 위 줄을 같이 쓴다).
+                    recovery3=self.ecg_obj_save(HRVRecovery3, 'recovery3', hrv_data) if hrv_data.get('recovery3') else None,
+                    recovery4=self.ecg_obj_save(HRVRecovery4, 'recovery4', hrv_data) if hrv_data.get('recovery4') else None,
                 )
 
             if str(data['eeg']).strip() != '""':
@@ -275,11 +279,19 @@ class ExperimentView(APIView):
                     stimulation3=self.eeg_obj_save(EEGStimulation3, 'stimulation3', eeg_data) if eeg_data.get('stimulation3', {}).get('topography_delta') else None,
                     stimulation4=self.eeg_obj_save(EEGStimulation4, 'stimulation4', eeg_data) if eeg_data.get('stimulation4', {}).get('topography_delta') else None,
                     recovery=self.eeg_obj_save(EEGRecovery, 'recovery', eeg_data) if eeg_data.get('recovery', {}).get('topography_delta') else None,
+                    # 9-phase 모드 (baseline, stim1, rec1, stim2, rec2, stim3, rec3, stim4, rec4)
+                    # 새 키는 recovery3·recovery4 뿐이다 (stimulation3·4 는 위 줄을 같이 쓴다).
+                    recovery3=self.eeg_obj_save(EEGRecovery3, 'recovery3', eeg_data) if eeg_data.get('recovery3', {}).get('topography_delta') else None,
+                    recovery4=self.eeg_obj_save(EEGRecovery4, 'recovery4', eeg_data) if eeg_data.get('recovery4', {}).get('topography_delta') else None,
                     diff1=self.eeg_diff_obj_save(EEGDiff1, 'diff1', eeg_data) if eeg_data.get('diff1') else None,
                     diff2=self.eeg_diff_obj_save(EEGDiff2, 'diff2', eeg_data) if eeg_data.get('diff2') else None,
                     diff3=self.eeg_diff_obj_save(EEGDiff3, 'diff3', eeg_data) if eeg_data.get('diff3') else None,
                     diff4=self.eeg_diff_obj_save(EEGDiff4, 'diff4', eeg_data) if eeg_data.get('diff4') else None,
                     diff5=self.eeg_diff_obj_save(EEGDiff5, 'diff5', eeg_data) if eeg_data.get('diff5') else None,
+                    # 9-phase 는 인접 쌍이 8개다. diffN 은 위치 슬롯이라 서버는 뜻을 모른 채 저장만 한다.
+                    diff6=self.eeg_diff_obj_save(EEGDiff6, 'diff6', eeg_data) if eeg_data.get('diff6') else None,
+                    diff7=self.eeg_diff_obj_save(EEGDiff7, 'diff7', eeg_data) if eeg_data.get('diff7') else None,
+                    diff8=self.eeg_diff_obj_save(EEGDiff8, 'diff8', eeg_data) if eeg_data.get('diff8') else None,
                     psd_spectrogram=EEGPSDSpectrogram.objects.create(
                         **{k: self.base64_file(v) for k, v in (lambda s: {
                             'cz':  s.get('cz',  s.get('Cz',  '')),
@@ -304,9 +316,10 @@ class ExperimentView(APIView):
                         faa_recovery1=self.base64_file(eeg_data['faa'].get('faa_recovery1')),
                         faa_stimulation2=self.base64_file(eeg_data['faa'].get('faa_stimulation2')),
                         faa_recovery2=self.base64_file(eeg_data['faa'].get('faa_recovery2')),
-                        # 6-phase 전용 키 — 있을 때만 넣는다 (컬럼 null 허용)
+                        # 6-phase·9-phase 에서 추가된 키 — 있을 때만 넣는다 (컬럼 null 허용)
                         **{k: self.base64_file(eeg_data['faa'][k])
-                           for k in ('faa_stimulation3', 'faa_stimulation4', 'faa_recovery')
+                           for k in ('faa_stimulation3', 'faa_stimulation4', 'faa_recovery',
+                                     'faa_recovery3', 'faa_recovery4')
                            if eeg_data['faa'].get(k)}
                     ),
                 )
@@ -543,9 +556,13 @@ BAND_FIGURE_ROWS = (
 # 구간 표기는 리포트 전체에서 한 벌이어야 한다. PDF 의 _kPhaseLabel 과 반드시
 # 같은 문자열을 쓴다 — 다르면 같은 문서 안에 두 가지 이름이 나온다.
 #
-# 5-phase(baseline, stim1, rec1, stim2, rec2)와 6-phase(baseline, stim1~4,
-# recovery) 키의 합집합을 시간 순서로 나열한 것이다. 세션마다 없는 phase 는
-# FK 가 None 이라 걸러지는데, 걸러낸 결과의 상대 순서가 두 모드 모두 올바르다.
+# 5-phase(baseline, stim1, rec1, stim2, rec2), 6-phase(baseline, stim1~4,
+# recovery), 9-phase(baseline, stim1, rec1, stim2, rec2, stim3, rec3, stim4, rec4)
+# 키의 합집합 10개를 시간 순서로 나열한 것이다. 세션마다 없는 phase 는 FK 가
+# None 이라 걸러지는데, 걸러낸 결과의 상대 순서가 어느 모드든 올바르다
+# (1·3-phase 와 중간에 끝난 세션은 9-phase 순서의 앞부분이다).
+# 6-phase 의 recovery 와 9-phase 의 recovery4 는 별개 키이고 같은 세션에 함께
+# 나오지 않는다. 클라이언트 utils/phase_defs.py 의 PHASE_SUPERSET 과 같은 순서여야 한다.
 CONNECTIVITY_PHASES = (
     ('baseline',     '기준'),
     ('stimulation1', '1차 자극'),
@@ -553,7 +570,9 @@ CONNECTIVITY_PHASES = (
     ('stimulation2', '2차 자극'),
     ('recovery2',    '2차 회복'),
     ('stimulation3', '3차 자극'),
+    ('recovery3',    '3차 회복'),
     ('stimulation4', '4차 자극'),
+    ('recovery4',    '4차 회복'),
     ('recovery',     '회복'),
 )
 
@@ -956,7 +975,7 @@ def _collect_report_data(exp) -> dict:
     # HRV 단계별
     hrv = exp.hrv
     # 존재하는 phase 만 담는다. CONNECTIVITY_PHASES 가 합집합을 시간 순서로
-    # 나열하므로, 없는 것을 거르면 5/6-phase 모두 올바른 순서가 된다.
+    # 나열하므로, 없는 것을 거르면 5/6/9-phase 모두 올바른 순서가 된다.
     phase_defs = []
     if hrv:
         for _attr, _ko in CONNECTIVITY_PHASES:
@@ -1367,7 +1386,7 @@ JSON 외 다른 텍스트(코드블록 포함)는 절대 출력하지 마세요.
 - domains 는 위 5개를 그 순서 그대로 작성하세요.
 - evidence.hrv.phase_notes 의 "phase" 는 위 [심박변이도 — 구간별] 에 나온 영문 키를
   (baseline, stimulation1, recovery1, stimulation2, recovery2, stimulation3,
-  stimulation4, recovery) 중 위 데이터에 실제로 나온 키만 소문자 그대로 쓰세요.
+  recovery3, stimulation4, recovery4, recovery) 중 위 데이터에 실제로 나온 키만 소문자 그대로 쓰세요.
   한글 이름을 넣으면 표에 연결되지 않습니다. 실제 존재하는 구간 수만큼 작성하세요.
 - evidence.eeg.band_captions 는 첨부된 대역 수만큼 작성하세요.
 - summary.domain_table 은 domains 와 같은 순서·같은 개수로 작성하세요.
@@ -1497,10 +1516,12 @@ def _report_queryset():
     return Experiments.objects.select_related(
         'hrv__baseline', 'hrv__stimulation1', 'hrv__recovery1',
         'hrv__stimulation2', 'hrv__recovery2',
-        'hrv__stimulation3', 'hrv__stimulation4', 'hrv__recovery',
+        'hrv__stimulation3', 'hrv__recovery3',
+        'hrv__stimulation4', 'hrv__recovery4', 'hrv__recovery',
         'eeg__baseline', 'eeg__stimulation1', 'eeg__recovery1',
         'eeg__stimulation2', 'eeg__recovery2',
-        'eeg__stimulation3', 'eeg__stimulation4', 'eeg__recovery',
+        'eeg__stimulation3', 'eeg__recovery3',
+        'eeg__stimulation4', 'eeg__recovery4', 'eeg__recovery',
         'eeg__faa', 'eeg__psd_spectrogram',
         'questionnaire', 'report',
     )

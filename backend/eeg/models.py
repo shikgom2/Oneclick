@@ -42,7 +42,8 @@ class EEG(TimeStampedModel):
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_RECOVERY_2_ID'
     )
-    # ── 6-phase 모드 (baseline, stim1~4, recovery) 전용 (ecg.HRV 와 동일 원칙) ──
+    # ── 6-phase 모드 (baseline, stim1~4, recovery) 에서 추가 (ecg.HRV 와 동일 원칙) ──
+    # stimulation3·stimulation4 는 9-phase 모드도 같은 뜻으로 쓴다. recovery 는 6-phase 전용.
     stimulation3 = models.ForeignKey(
         'eeg.EEGStimulation3',
         null=True, on_delete=models.CASCADE,
@@ -57,6 +58,19 @@ class EEG(TimeStampedModel):
         'eeg.EEGRecovery',
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_RECOVERY_ID'
+    )
+    # ── 9-phase 모드 (baseline, stim1, rec1, stim2, rec2, stim3, rec3, stim4, rec4) ──
+    # 새 키는 recovery3·recovery4 둘뿐이다. 9-phase 의 마지막 구간 recovery4 와
+    # 6-phase 의 recovery 는 별개 키다 (같은 세션에 함께 나오지 않는다).
+    recovery3 = models.ForeignKey(
+        'eeg.EEGRecovery3',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_RECOVERY_3_ID'
+    )
+    recovery4 = models.ForeignKey(
+        'eeg.EEGRecovery4',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_RECOVERY_4_ID'
     )
     diff1 = models.ForeignKey(
         'eeg.EEGDiff1',
@@ -83,6 +97,25 @@ class EEG(TimeStampedModel):
         'eeg.EEGDiff5',
         null=True, on_delete=models.CASCADE,
         related_name='eeg', db_column='EEG_DIFF_5_ID'
+    )
+    # 9-phase 는 인접 쌍이 8개라 diff6~diff8 이 필요하다.
+    # diffN 은 'N번째 인접 쌍' 이라는 위치 슬롯이라 뜻이 모드마다 다르다
+    # (diff5 는 6-phase 에서 recovery-stim4, 9-phase 에서 stim3-rec2).
+    # 어떤 쌍인지는 저장하지 않으므로 그 세션의 phase 목록에서 유도해야 한다.
+    diff6 = models.ForeignKey(
+        'eeg.EEGDiff6',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_DIFF_6_ID'
+    )
+    diff7 = models.ForeignKey(
+        'eeg.EEGDiff7',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_DIFF_7_ID'
+    )
+    diff8 = models.ForeignKey(
+        'eeg.EEGDiff8',
+        null=True, on_delete=models.CASCADE,
+        related_name='eeg', db_column='EEG_DIFF_8_ID'
     )
     faa = models.ForeignKey(
         'eeg.EEGFAA',
@@ -176,7 +209,7 @@ class EEGFAA(TimeStampedModel):
         null=False, blank=False,
         db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY2'
     )
-    # 6-phase 전용. 기존 행에는 값이 없으므로 null 허용이어야 한다
+    # 6-phase 에서 추가. 기존 행에는 값이 없으므로 null 허용이어야 한다
     # (기존 5개 컬럼의 null=False 는 이미 쌓인 데이터 때문에 그대로 둔다).
     faa_stimulation3 = models.ImageField(
         null=True, blank=True,
@@ -189,6 +222,15 @@ class EEGFAA(TimeStampedModel):
     faa_recovery = models.ImageField(
         null=True, blank=True,
         db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY'
+    )
+    # 9-phase 에서 추가. 같은 이유로 null 허용이어야 한다.
+    faa_recovery3 = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY3'
+    )
+    faa_recovery4 = models.ImageField(
+        null=True, blank=True,
+        db_column='EEG_FRONTAL_ASYMMETRY_RECOVERY4'
     )
 
     class Meta:
@@ -320,6 +362,18 @@ class EEGRecovery(EEGParameter):
         db_table = 'OC_EEG_RECOVERY'
 
 
+class EEGRecovery3(EEGParameter):
+    """9-phase 모드의 3차 회복 구간 ('3차 회복')."""
+    class Meta:
+        db_table = 'OC_EEG_RECOVERY_3'
+
+
+class EEGRecovery4(EEGParameter):
+    """9-phase 모드의 4차 회복 구간 ('4차 회복'). 6-phase 의 EEGRecovery 와는 별개다."""
+    class Meta:
+        db_table = 'OC_EEG_RECOVERY_4'
+
+
 class EEGDiffParameter(EEGParameter):
     # >> WAKE stage topography
     topography_delta_wake = models.ImageField(null=True, blank=True, db_column='EEG_TOPOGRAPHY_DELTA_WAKE')
@@ -428,3 +482,18 @@ class EEGDiff4(EEGDiffParameter):
 class EEGDiff5(EEGDiffParameter):
     class Meta:
         db_table = 'OC_EEG_DIFF_5'
+
+
+class EEGDiff6(EEGDiffParameter):
+    class Meta:
+        db_table = 'OC_EEG_DIFF_6'
+
+
+class EEGDiff7(EEGDiffParameter):
+    class Meta:
+        db_table = 'OC_EEG_DIFF_7'
+
+
+class EEGDiff8(EEGDiffParameter):
+    class Meta:
+        db_table = 'OC_EEG_DIFF_8'

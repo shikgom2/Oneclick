@@ -74,9 +74,39 @@ class EEGRecoverySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class EEGRecovery3Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGRecovery3
+        fields = '__all__'
+
+
+class EEGRecovery4Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGRecovery4
+        fields = '__all__'
+
+
 class EEGDiff5Serializer(serializers.ModelSerializer):
     class Meta:
         model = EEGDiff5
+        fields = '__all__'
+
+
+class EEGDiff6Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGDiff6
+        fields = '__all__'
+
+
+class EEGDiff7Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGDiff7
+        fields = '__all__'
+
+
+class EEGDiff8Serializer(serializers.ModelSerializer):
+    class Meta:
+        model = EEGDiff8
         fields = '__all__'
 
 
@@ -103,14 +133,21 @@ class EEGSerializer(serializers.ModelSerializer):
     recovery1 = EEGRecovery1Serializer(read_only=True)
     stimulation2 = EEGStimulation2Serializer(read_only=True)
     recovery2 = EEGRecovery2Serializer(read_only=True)
+    # phase 는 합집합의 시간 순서로 둔다 (experiments.views.CONNECTIVITY_PHASES 와 같은 순서).
+    # 세션에 없는 phase·diff 는 키를 빼지 않고 null 로 나간다.
     stimulation3 = EEGStimulation3Serializer(read_only=True)
+    recovery3 = EEGRecovery3Serializer(read_only=True)
     stimulation4 = EEGStimulation4Serializer(read_only=True)
+    recovery4 = EEGRecovery4Serializer(read_only=True)
     recovery = EEGRecoverySerializer(read_only=True)
     diff1 = EEGDiff1Serializer(read_only=True)
     diff2 = EEGDiff2Serializer(read_only=True)
     diff3 = EEGDiff3Serializer(read_only=True)
     diff4 = EEGDiff4Serializer(read_only=True)
     diff5 = EEGDiff5Serializer(read_only=True)
+    diff6 = EEGDiff6Serializer(read_only=True)
+    diff7 = EEGDiff7Serializer(read_only=True)
+    diff8 = EEGDiff8Serializer(read_only=True)
     faa = EEGFaaSerializer(read_only=True)
     psd_spectrogram = EEGPSDSpectrogramSerializer(read_only=True)
     trigger = serializers.SerializerMethodField()
@@ -132,13 +169,18 @@ class EEGSerializer(serializers.ModelSerializer):
             'stimulation2',
             'recovery2',
             'stimulation3',
+            'recovery3',
             'stimulation4',
+            'recovery4',
             'recovery',
             'diff1',
             'diff2',
             'diff3',
             'diff4',
             'diff5',
+            'diff6',
+            'diff7',
+            'diff8',
             'faa',
             'psd_spectrogram',
             'spindle_coupling',

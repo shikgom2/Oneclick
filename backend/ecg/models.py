@@ -37,9 +37,10 @@ class HRV(TimeStampedModel):
         null=True, on_delete=models.CASCADE,
         related_name='hrv', db_column='HRV_RECOVERY_2_ID'
     )
-    # ── 6-phase 모드 (baseline, stim1~4, recovery) 전용 ──
+    # ── 6-phase 모드 (baseline, stim1~4, recovery) 에서 추가 ──
     # recovery1/recovery2 를 재사용하지 않고 새 컬럼을 쓰는 이유:
     # 키 하나가 모드와 무관하게 정확히 하나의 뜻(라벨·순서)을 갖게 하기 위해서다.
+    # stimulation3·stimulation4 는 9-phase 모드도 같은 뜻으로 쓴다. recovery 는 6-phase 전용.
     stimulation3 = models.ForeignKey(
         'ecg.HRVStimulation3',
         null=True, on_delete=models.CASCADE,
@@ -54,6 +55,19 @@ class HRV(TimeStampedModel):
         'ecg.HRVRecovery',
         null=True, on_delete=models.CASCADE,
         related_name='hrv', db_column='HRV_RECOVERY_ID'
+    )
+    # ── 9-phase 모드 (baseline, stim1, rec1, stim2, rec2, stim3, rec3, stim4, rec4) ──
+    # 새 키는 recovery3·recovery4 둘뿐이다. 같은 원칙으로, 9-phase 의 마지막 구간
+    # recovery4 와 6-phase 의 recovery 는 별개 키다 (같은 세션에 함께 나오지 않는다).
+    recovery3 = models.ForeignKey(
+        'ecg.HRVRecovery3',
+        null=True, on_delete=models.CASCADE,
+        related_name='hrv', db_column='HRV_RECOVERY_3_ID'
+    )
+    recovery4 = models.ForeignKey(
+        'ecg.HRVRecovery4',
+        null=True, on_delete=models.CASCADE,
+        related_name='hrv', db_column='HRV_RECOVERY_4_ID'
     )
     note = models.TextField(
         null=True, blank=True,
@@ -172,3 +186,15 @@ class HRVRecovery(HRVParameter):
     """6-phase 모드의 마지막 회복 구간 ('회복')."""
     class Meta:
         db_table = 'OC_HRV_RECOVERY'
+
+
+class HRVRecovery3(HRVParameter):
+    """9-phase 모드의 3차 회복 구간 ('3차 회복')."""
+    class Meta:
+        db_table = 'OC_HRV_RECOVERY_3'
+
+
+class HRVRecovery4(HRVParameter):
+    """9-phase 모드의 4차 회복 구간 ('4차 회복'). 6-phase 의 HRVRecovery 와는 별개다."""
+    class Meta:
+        db_table = 'OC_HRV_RECOVERY_4'
